@@ -286,6 +286,87 @@ All supported types can be returned from methods:
 | Nested objects | Dict/Object/Table |
 | Smart pointers | Converted value or null |
 
+### Pointer returns (Python)
+
+A factory-style C++ API hands out the objects it owns as raw pointers:
+`XMLDocument::RootElement()`, `b2World::GetBodyList()`. A `T*` does not say
+who owns the `T`, so mirror_bridge answers the one case the signature settles
+and refuses the rest, almost all of it by name at build time.
+
+| Return | From | Crosses as |
+|--------|------|------------|
+| `T*`, `T` a bound class | an instance method | A **borrow**: a wrapper over the library's own object. It frees nothing, a write through it reaches the object, and it keeps the owner alive. `None` when null |
+| `T*`, `T` a class that could be bound and that no loaded module binds | an instance method | Bound, and raises `TypeError` naming the class when called. Whether a class is bound is not known until the modules are loaded |
+| `T*`, `T` a class that could never be bound: a standard-library class, `FILE`, a struct of raw pointers, a class that converts as a container | anywhere | Not bound |
+| `T*` | a static method, a free function or an operator | Not bound. There is no receiver whose lifetime could stand in for the object's |
+| `T*` | a method named `begin`, `end`, `data` or one of their `c`/`r` forms | Not bound. That is a position, not an object: `end()` is one past the last element |
+| `const T*` | anywhere | Not bound. A wrapper is a mutable handle, so a borrow would let Python write through a pointer C++ declared read-only |
+| `T**`, `int*`, a pointer to a forward-declared class | anywhere | Not bound |
+
+```cpp
+class Tree {
+public:
+    Node* create(int value);   // borrow
+    Node* find(int value);     // borrow, or None
+};
+```
+
+```python
+tree = Tree()
+node = tree.create(5)
+node.set_value(6)             # changes the Tree's own Node
+assert tree.find(6) is not None
+assert tree.find(99) is None
+
+node = Tree().create(5)       # the Tree has no other reference...
+node.value()                  # ...and is still alive: the borrow holds it
+```
+
+**What keeps what alive.** A borrow holds a reference to the object the method
+was called on, or, when that object is itself a borrow, to *its* owner. Walking
+`doc.RootElement().FirstChildElement().FirstChildElement()` therefore pins the
+document once per wrapper you keep, and no intermediate node. A method that
+returns the receiver or its owner (`node.GetDocument()`, a setter that returns
+`this`) returns the Python object that already exists, so
+`node.GetDocument() is doc` and a Python subclass stays one through a chain of
+calls. Any other object gets a new wrapper each time, so compare borrows by
+what they hold and not with `is`.
+
+**A class nobody outside may destroy** — a private, protected or deleted
+destructor, which is how tinyxml2 and box2d say "the library frees these" —
+binds as a class that is only ever borrowed. Its methods work. Constructing
+one from Python raises `TypeError`, including when it has a public constructor
+or a trampoline, because nothing could free the result. A method of such a
+class that returns or takes the class *by value* is not bound: receiving the
+value would mean destroying it.
+
+**`const`/non-`const` pairs.** A class that declares both
+`const Item* at(int) const` and `Item* at(int)` has one Python method `at`,
+the non-`const` one, since that is the half that can cross. `generate` does not
+list the `const` half as declined.
+
+**What a borrow assumes, and no signature can tell it:**
+
+- *The object belongs to the receiver.* `Node* Node::clone_into(Doc& target)`
+  returns something `target` owns. The borrow keeps the receiver's owner
+  alive, which is the wrong one, and dangles when `target` goes.
+- *The pointer is to one object.* A method returning a pointer to the first
+  element of an array gives you that element only.
+- *The owner does not free the object while it is itself alive* —
+  `XMLDocument::Clear()`, `b2World::DestroyBody()`. A wrapper taken earlier
+  then points at freed memory, exactly as the `T*` would in C++.
+- *The caller is not meant to free it.* A method whose returned pointer the
+  caller should `delete` is bound as a borrow, and the object leaks. Return a
+  `std::unique_ptr` instead.
+
+Not covered yet: a pointer *parameter* (`world.DestroyBody(body)`,
+`node.InsertEndChild(child)`), any `const T*` return, and returning the
+most-derived type for a pointer to a polymorphic base (an `XMLNode*` that is
+really an `XMLElement` arrives as an `XMLNode`; the library's own
+`ToElement()` narrows it). Lua and JavaScript still refuse pointer returns; C#
+borrows them under its own rules, described in
+[the C# design notes](../internals/csharp-design.md#a-class-c-cannot-own-binds-borrow-only).
+
 ## Const Correctness
 
 Const methods are supported and bound correctly:
@@ -711,7 +792,10 @@ cannot cross is something you hear about from `generate` rather than from an
 
 | Shape | Status | What to write instead |
 |-------|--------|-----------------------|
-| `T*` as a parameter or return | Not bound | A pointer says nothing about who owns the thing. Return by value, or use `shared_ptr`/`unique_ptr`, which do |
+| `T*` as a parameter | Not bound | A pointer says nothing about who owns the thing. Take `T&`, which aliases the Python object |
+| `T*` returned by an instance method, `T` a bound class | Python: bound, a borrow that keeps the owner alive. Lua, JavaScript: not bound | Nothing. See [Pointer returns](#pointer-returns-python) for what it assumes about lifetime |
+| `const T*` as a return | Not bound | Return `const T&`, which crosses as a copy, or add a non-`const` overload |
+| `T*` returned by a static method or free function | Not bound | There is no owner to keep alive. Return by value or by `unique_ptr`, or make it a method of the owner |
 | `const char*` as a parameter or return | Bound, crosses as `str` | Nothing. The caller borrows it and the value is copied into a Python `str` before the call returns. A null crosses as `None`, which is how a C API says "absent" |
 | `char*` as a return | Not bound | By convention that one is the caller's to free, so copying it would leak. Return `std::string` |
 | `const T&` as a parameter | Bound, no copy | Nothing |

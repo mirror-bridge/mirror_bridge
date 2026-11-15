@@ -537,8 +537,7 @@ consteval std::size_t get_data_member_with_bases_count() {
 // namespace std { ... } }` is legal, and an unanchored name match silently
 // took a user class's inherited methods away. Anchoring to the global
 // namespace costs one comparison.
-consteval bool is_std_library_type(std::meta::info cls) {
-    if (!std::meta::has_template_arguments(cls)) return false;
+consteval bool is_declared_in_std(std::meta::info cls) {
     std::meta::info scope = cls;
     while (std::meta::is_class_member(scope) || std::meta::is_namespace_member(scope)) {
         scope = std::meta::parent_of(scope);
@@ -549,6 +548,10 @@ consteval bool is_std_library_type(std::meta::info cls) {
         }
     }
     return false;
+}
+
+consteval bool is_std_library_type(std::meta::info cls) {
+    return std::meta::has_template_arguments(cls) && is_declared_in_std(cls);
 }
 
 template<typename T>
@@ -868,6 +871,55 @@ consteval bool static_method_params_are_value_bindable() {
 //
 // This is analogous to pybind11's shared_ptr holder approach, but lighter.
 
+// Does `type` name, by value, a class that is only forward declared -- either
+// itself or through a template argument, however deep?
+//
+// Asked before anything that needs the type complete. `Holder<Fwd>` is a
+// perfectly good name while Fwd is incomplete, and sizeof(Holder<Fwd>) is a
+// hard error rather than `false` if Holder keeps a Fwd by value: the
+// instantiation fails outside the immediate context, so no requires-clause
+// can catch it and the whole module is lost. A template argument reached
+// through a pointer or a reference is fine and is not followed.
+consteval bool names_incomplete_class(std::meta::info type) {
+    type = std::meta::remove_cv(std::meta::dealias(type));
+    if (!std::meta::is_class_type(type)) return false;
+    if (std::meta::has_template_arguments(type)) {
+        for (std::meta::info arg : std::meta::template_arguments_of(type)) {
+            if (std::meta::is_type(arg) && names_incomplete_class(arg)) return true;
+        }
+        // The specialization's own completeness is not asked: answering it
+        // means instantiating, which is the thing being avoided.
+        return false;
+    }
+    return !std::meta::is_complete_type(type);
+}
+
+// Would holding a value of `type` need a destructor this code may not call?
+// True for a class whose destructor is private, protected or deleted, and
+// for anything that holds one by value: optional<V>, vector<V>, pair<V, int>.
+//
+// Such a class binds as one that is only ever borrowed, and a borrow never
+// destroys anything. But its own methods can still name it by value --
+// `V scaled() const`, `void absorb(V)`, `std::vector<V> all()` -- because a
+// member may call a destructor the rest of the program may not. The binding
+// is the rest of the program: receiving that return or building that
+// argument means destroying a V, which does not compile, and one such method
+// used to cost the whole module once the class stopped being skipped.
+//
+// unique_ptr<V> and shared_ptr<V> are caught by the same walk. Their own
+// destructors exist, so the trait says yes, and instantiating them says no.
+consteval bool value_cannot_be_destroyed(std::meta::info type) {
+    type = std::meta::remove_cv(std::meta::dealias(type));
+    if (!std::meta::is_class_type(type)) return false;
+    if (std::meta::has_template_arguments(type)) {
+        for (std::meta::info arg : std::meta::template_arguments_of(type)) {
+            if (std::meta::is_type(arg) && value_cannot_be_destroyed(arg)) return true;
+        }
+    }
+    if (names_incomplete_class(type)) return false;
+    return !std::meta::is_destructible_type(type);
+}
+
 // Can this parameter type participate in a bound method signature at all?
 // True iff we can either store it by value OR via pointer-holder.
 template<typename T>
@@ -884,6 +936,12 @@ consteval bool is_param_bindable() {
     // module to compile instead of declining that one constructor.
     if constexpr (SmartPointer<U>) {
         if constexpr (!requires { sizeof(typename U::element_type); }) return false;
+    }
+    // By value or by rvalue reference the argument is a V this code has to
+    // build and then destroy. By lvalue reference it is the caller's own
+    // object, borrowed for the call, and that is fine for any class.
+    if constexpr (!std::is_lvalue_reference_v<T>) {
+        if (value_cannot_be_destroyed(^^U)) return false;
     }
     if constexpr (is_value_bindable<U>()) return true;
     // Complete, non-pointer class type → use pointer-holder
