@@ -293,7 +293,7 @@ def compiles_bare(lib, checkout, headers, work_dir, timeout):
     return False, first[:220]
 
 
-def classify_exports(wanted, exported):
+def classify_exports(wanted, exported, members=()):
     """Judge a module that imports by what it actually exposes.
 
     Building and importing is not the bar. entt produced a module exporting
@@ -303,13 +303,21 @@ def classify_exports(wanted, exported):
     says a usable binding has to expose, taken from the library's own README
     rather than from what happens to bind.
 
+    A class being exported is not the bar either, for a class the library
+    hands out rather than lets you build. box2d's b2Body became a name in the
+    module the day classes with private destructors could bind, and stayed
+    unobtainable: `b2World::CreateBody` takes a pointer parameter and was not
+    bound, so the row would have read "binds" for a world nothing can be put
+    in. An entry written `Class.member` is therefore looked up among
+    `members`, the `Class.member` names the module really has.
+
     Returns the fields to merge into the result row.
     """
     out = {"must_export_present": [], "must_export_missing": []}
     if not wanted:
         out.update(status="ok", category="ok", reason="", detail="")
         return out
-    have = set(exported)
+    have = set(exported) | set(members)
     present = [n for n in wanted if n in have]
     missing = [n for n in wanted if n not in have]
     out["must_export_present"] = present
@@ -542,11 +550,18 @@ def run_one(lib, cli, cache_dir, work_dir, timeout, lang="python"):
 
     # The names come back too, not just the count, because `must_export` below
     # has to be checked against them.
+    # Top-level names first, then every class's own public names as
+    # `Class.member`, tab-indented so the two cannot be confused: a member
+    # line must never be counted as an export.
     probe = subprocess.run(
         [sys.executable, "-c",
          "import sys; sys.path.insert(0, sys.argv[1]); "
          "m = __import__(sys.argv[2]); "
-         "print('\\n'.join(sorted(n for n in dir(m) if not n.startswith('_'))))",
+         "names = sorted(n for n in dir(m) if not n.startswith('_')); "
+         "print('\\n'.join(names)); "
+         "[print('\\t' + n + '.' + a) for n in names "
+         " if isinstance(getattr(m, n), type) "
+         " for a in sorted(dir(getattr(m, n))) if not a.startswith('_')]",
          out, lib["module"]],
         capture_output=True, text=True, timeout=120)
     if probe.returncode != 0:
@@ -567,7 +582,9 @@ def run_one(lib, cli, cache_dir, work_dir, timeout, lang="python"):
                        detail=last)
         return row
 
-    exported = [n for n in probe.stdout.split("\n") if n.strip()]
+    lines = [n for n in probe.stdout.split("\n") if n.strip()]
+    exported = [n for n in lines if not n.startswith("\t")]
+    members = [n.strip() for n in lines if n.startswith("\t")]
     row["exported_names"] = len(exported)
     row["exported_sample"] = exported[:40]
 
@@ -577,9 +594,31 @@ def run_one(lib, cli, cache_dir, work_dir, timeout, lang="python"):
     # counted as successes beside jsoncpp. `must_export` is what the manifest
     # says a usable binding of this library has to expose, chosen from the
     # library's own documentation rather than from what happens to bind.
-    verdict = classify_exports(lib.get("must_export") or [], exported)
+    verdict = classify_exports(lib.get("must_export") or [], exported, members)
     row.update(verdict)
     return row
+
+
+def csharp_members(cs):
+    """`Class.method` for every public method of every class in a generated .cs.
+
+    The generator writes each bound class at column 0 and its methods one
+    level in, so position is enough and no C# parser is needed. A nested
+    `<Class>Handle` is indented and therefore never mistaken for a class.
+    """
+    found = set()
+    current = None
+    for line in cs.splitlines():
+        top = re.match(r"(?:\w+ )*class (\w+)", line)
+        if top:
+            # Any class at column 0 ends the previous one, whatever its
+            # modifiers, so a method is never credited to the class before.
+            current = top.group(1) if line.startswith("public ") else None
+            continue
+        method = re.match(r"    public (?:static )?[^=(]*?\b(\w+)\(", line)
+        if method and current:
+            found.add(current + "." + method.group(1))
+    return found
 
 
 # The C# half of "is this usable". Two questions, in order: does the library
@@ -639,7 +678,8 @@ def finish_csharp(row, lib, out, module):
     api = sorted(n for n in declared if not generated(n))
     row["exported_names"] = len(api)
     row["exported_sample"] = api[:40]
-    row.update(classify_exports(lib.get("must_export") or [], sorted(declared)))
+    row.update(classify_exports(lib.get("must_export") or [], sorted(declared),
+                                csharp_members(cs)))
     return row
 
 
