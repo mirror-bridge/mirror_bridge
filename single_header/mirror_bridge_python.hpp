@@ -537,8 +537,7 @@ consteval std::size_t get_data_member_with_bases_count() {
 // namespace std { ... } }` is legal, and an unanchored name match silently
 // took a user class's inherited methods away. Anchoring to the global
 // namespace costs one comparison.
-consteval bool is_std_library_type(std::meta::info cls) {
-    if (!std::meta::has_template_arguments(cls)) return false;
+consteval bool is_declared_in_std(std::meta::info cls) {
     std::meta::info scope = cls;
     while (std::meta::is_class_member(scope) || std::meta::is_namespace_member(scope)) {
         scope = std::meta::parent_of(scope);
@@ -549,6 +548,10 @@ consteval bool is_std_library_type(std::meta::info cls) {
         }
     }
     return false;
+}
+
+consteval bool is_std_library_type(std::meta::info cls) {
+    return std::meta::has_template_arguments(cls) && is_declared_in_std(cls);
 }
 
 template<typename T>
@@ -868,6 +871,55 @@ consteval bool static_method_params_are_value_bindable() {
 //
 // This is analogous to pybind11's shared_ptr holder approach, but lighter.
 
+// Does `type` name, by value, a class that is only forward declared -- either
+// itself or through a template argument, however deep?
+//
+// Asked before anything that needs the type complete. `Holder<Fwd>` is a
+// perfectly good name while Fwd is incomplete, and sizeof(Holder<Fwd>) is a
+// hard error rather than `false` if Holder keeps a Fwd by value: the
+// instantiation fails outside the immediate context, so no requires-clause
+// can catch it and the whole module is lost. A template argument reached
+// through a pointer or a reference is fine and is not followed.
+consteval bool names_incomplete_class(std::meta::info type) {
+    type = std::meta::remove_cv(std::meta::dealias(type));
+    if (!std::meta::is_class_type(type)) return false;
+    if (std::meta::has_template_arguments(type)) {
+        for (std::meta::info arg : std::meta::template_arguments_of(type)) {
+            if (std::meta::is_type(arg) && names_incomplete_class(arg)) return true;
+        }
+        // The specialization's own completeness is not asked: answering it
+        // means instantiating, which is the thing being avoided.
+        return false;
+    }
+    return !std::meta::is_complete_type(type);
+}
+
+// Would holding a value of `type` need a destructor this code may not call?
+// True for a class whose destructor is private, protected or deleted, and
+// for anything that holds one by value: optional<V>, vector<V>, pair<V, int>.
+//
+// Such a class binds as one that is only ever borrowed, and a borrow never
+// destroys anything. But its own methods can still name it by value --
+// `V scaled() const`, `void absorb(V)`, `std::vector<V> all()` -- because a
+// member may call a destructor the rest of the program may not. The binding
+// is the rest of the program: receiving that return or building that
+// argument means destroying a V, which does not compile, and one such method
+// used to cost the whole module once the class stopped being skipped.
+//
+// unique_ptr<V> and shared_ptr<V> are caught by the same walk. Their own
+// destructors exist, so the trait says yes, and instantiating them says no.
+consteval bool value_cannot_be_destroyed(std::meta::info type) {
+    type = std::meta::remove_cv(std::meta::dealias(type));
+    if (!std::meta::is_class_type(type)) return false;
+    if (std::meta::has_template_arguments(type)) {
+        for (std::meta::info arg : std::meta::template_arguments_of(type)) {
+            if (std::meta::is_type(arg) && value_cannot_be_destroyed(arg)) return true;
+        }
+    }
+    if (names_incomplete_class(type)) return false;
+    return !std::meta::is_destructible_type(type);
+}
+
 // Can this parameter type participate in a bound method signature at all?
 // True iff we can either store it by value OR via pointer-holder.
 template<typename T>
@@ -884,6 +936,12 @@ consteval bool is_param_bindable() {
     // module to compile instead of declining that one constructor.
     if constexpr (SmartPointer<U>) {
         if constexpr (!requires { sizeof(typename U::element_type); }) return false;
+    }
+    // By value or by rvalue reference the argument is a V this code has to
+    // build and then destroy. By lvalue reference it is the caller's own
+    // object, borrowed for the call, and that is fine for any class.
+    if constexpr (!std::is_lvalue_reference_v<T>) {
+        if (value_cannot_be_destroyed(^^U)) return false;
     }
     if constexpr (is_value_bindable<U>()) return true;
     // Complete, non-pointer class type → use pointer-holder
@@ -3019,6 +3077,13 @@ std::string type_hint() {
         return "str";
     } else if constexpr (std::is_void_v<CleanT>) {
         return "None";
+    } else if constexpr (std::is_pointer_v<CleanT>) {
+        // The only other pointer that gets bound is a pointer to a class
+        // returned by an instance method, which crosses as a borrow of that
+        // class and as None when it is null. Saying so matters to a
+        // caller: `doc.RootElement().Name()` on an empty document is the bug
+        // a type checker can catch only if the stub admits the None.
+        return type_hint<std::remove_cv_t<std::remove_pointer_t<CleanT>>, P>() + " | None";
     }
 
     // Eigen fixed-size vectors/matrices convert to (nested) Python lists.
@@ -5294,6 +5359,100 @@ PyObject* vector_to_numpy_view(std::vector<T>& vec, PyObject* owner) {
     return create_buffer_view(vec, owner);
 }
 
+// ============================================================================
+// Pointer Returns: Borrowed Objects
+// ============================================================================
+//
+// A returned `T*` does not say who owns the T, which is why pointer returns
+// were refused outright. One shape can be answered without guessing, and in
+// a factory-style library it is most of the API (tinyxml2: 82 of XMLElement's
+// 116 methods return a pointer):
+//
+//   T*  from an INSTANCE method crosses as a BORROW: a wrapper that points at
+//       the library's own object, frees nothing, and holds a reference to the
+//       receiver's owner so that owner outlives it. This is the policy
+//       pybind11 calls reference_internal, chosen here from the signature
+//       instead of written per method.
+//
+// A static method, a free function or an operator returning `T*` has no
+// receiver, so there is no object whose lifetime could stand in for the
+// pointee's. Those stay refused: a borrow minted there would be unowned by
+// construction.
+//
+// `const T*` stays refused too. A wrapper is a mutable handle, so borrowing
+// through a const pointer would hand Python a way to write to something C++
+// said it may not. Copying instead would return a snapshot where the caller
+// expects the library's object, and is not possible at all for the
+// non-copyable classes these APIs are made of. It wants a read-only borrow,
+// which is its own piece of work.
+//
+// What the borrow assumes and cannot check, because no signature says it:
+//   - the pointee belongs to the receiver. `Node* Node::clone_into(Doc&)`
+//     returns something the ARGUMENT owns; the borrow pins the wrong object.
+//   - the pointee is one object. `T* data()` on an empty container is not.
+//     The iterator protocol's own names are refused by name, below.
+//   - the owner does not free the object while it is itself alive
+//     (XMLDocument::Clear, b2World::DestroyBody). The wrapper then dangles,
+//     exactly as the `T*` would in C++.
+//   - the caller was not meant to free it. A method returning a pointer the
+//     caller owns is bound as a borrow, and the object leaks.
+template<typename Ret>
+consteval bool returns_borrowable_pointer() {
+    using Clean = std::remove_cvref_t<Ret>;
+    if constexpr (!std::is_pointer_v<Clean>) {
+        return false;
+    } else {
+        using Pointee = std::remove_pointer_t<Clean>;
+        if constexpr (std::is_const_v<Pointee> || std::is_volatile_v<Pointee> ||
+                      !std::is_class_v<Pointee>) {
+            return false;
+        } else if constexpr (mirror_bridge::core::is_declared_in_std(
+                                 std::meta::dealias(^^Pointee)) ||
+                             mirror_bridge::core::names_incomplete_class(^^Pointee)) {
+            // dealias: `Pointee` is an alias declared three lines up, and the
+            // scope of an alias is where the alias is, not where the class is.
+            //
+            // Both asked BEFORE anything that needs the pointee complete. A
+            // pointer can name a class template specialization that was never
+            // instantiated and cannot be -- `Holder<Fwd>*` where Holder keeps
+            // a Fwd by value and Fwd is only forward declared -- and asking
+            // sizeof of it is not "false", it is a hard error that costs the
+            // whole module. A C API hands out pointers to forward-declared
+            // handles constantly (sqlite3_stmt*), and those land here too.
+            return false;
+        } else if constexpr (!NestedBindable<Pointee>) {
+            return false;
+        } else {
+            // The pointee has to be a class bind_class would accept, since a
+            // borrow is only ever a wrapper of a bound class. Whether a
+            // module actually binds it is a runtime fact and is checked
+            // there; what can be known here is that `FILE*`, or a pointer to
+            // a struct full of raw pointers, never will be.
+            return mirror_bridge::core::validate_bindable_members<Pointee>();
+        }
+    }
+}
+
+// begin/end and their relatives return a position, not an object: `end()` is
+// one past the last element by definition, and wrapping it handed Python a
+// writable reference to whatever sits after the array. `data()` is the same
+// pointer under another name and is equally invalid for an empty container.
+// These are the names the language and the standard library give the
+// protocol (range-for looks up `begin` and `end` by name), which is why a
+// name test is the right test here and not a guess.
+consteval bool names_an_iterator_accessor(std::string_view name) {
+    for (std::string_view reserved : {"begin", "end", "cbegin", "cend", "rbegin", "rend",
+                                      "crbegin", "crend", "data"}) {
+        if (name == reserved) return true;
+    }
+    return false;
+}
+
+// Wrap `*ptr` without taking ownership of it, keeping `receiver`'s owner
+// alive. Defined after the cross-module type registry it consults.
+template<typename Class>
+PyObject* borrow_into_python(Class* ptr, PyObject* receiver);
+
 // The conversion for a result the caller has just computed and is about to
 // drop. Everything except a columnar vector goes to the same overload it
 // always did, by lvalue, so this cannot change which overload is selected for
@@ -5316,6 +5475,20 @@ PyObject* to_python_result(R& result) {
 #else
     return to_python(result);
 #endif
+}
+
+// The same, for the result of an instance method called on `receiver`. A
+// separate function and not a defaulted parameter on the one above: every
+// other caller of to_python_result has no receiver, and a borrow reached
+// from one of them has to be a compile error, as it always was, and not a
+// null dereference at the first call.
+template<typename R>
+PyObject* method_result_to_python(R& result, PyObject* receiver) {
+    if constexpr (returns_borrowable_pointer<R>()) {
+        return borrow_into_python(result, receiver);
+    } else {
+        return to_python_result(result);
+    }
 }
 // How many bytes a numeric vector has to be before its return borrows the
 // container's storage instead of copying it into an intermediate bytes object.
@@ -6613,18 +6786,25 @@ T* inline_payload(PyWrapper<T>* w) {
 // tp_dealloc destroy them a second time.
 template<typename T>
 void release_held_object(PyWrapper<T>* wrapper) {
-    if (wrapper->owns && wrapper->cpp_object) {
-        // An inline payload is distinguishable without a flag: it is the only
-        // object that can sit at exactly this address.
-        if constexpr (payload_fits_inline_v<T>) {
-            if (wrapper->cpp_object == inline_payload(wrapper)) {
-                wrapper->cpp_object->~T();
-                wrapper->cpp_object = nullptr;
-                wrapper->owns = false;
-                return;
+    // A class whose destructor is private or deleted can only ever be
+    // borrowed, so no wrapper of it owns anything. The test has to be made at
+    // compile time: a runtime `if` still instantiates `delete` for every T,
+    // and `delete` through an inaccessible destructor is ill-formed whether
+    // or not the branch is ever taken.
+    if constexpr (std::is_destructible_v<T>) {
+        if (wrapper->owns && wrapper->cpp_object) {
+            // An inline payload is distinguishable without a flag: it is the
+            // only object that can sit at exactly this address.
+            if constexpr (payload_fits_inline_v<T>) {
+                if (wrapper->cpp_object == inline_payload(wrapper)) {
+                    wrapper->cpp_object->~T();
+                    wrapper->cpp_object = nullptr;
+                    wrapper->owns = false;
+                    return;
+                }
             }
+            delete wrapper->cpp_object;
         }
-        delete wrapper->cpp_object;
     }
     wrapper->cpp_object = nullptr;
     wrapper->owns = false;
@@ -6838,6 +7018,20 @@ consteval std::size_t get_constructor_count() {
         }
     }
     return count;
+}
+
+// How many of those Python may call. None, for a class whose destructor is
+// not accessible: `new T(args)` compiles for such a class, but the wrapper
+// could never free what it built, so every object made from Python would
+// leak. A ref-counted class with a public constructor and a private
+// destructor is the usual shape. Such a class is only ever borrowed.
+template<typename T>
+consteval std::size_t callable_constructor_count() {
+    if constexpr (!std::is_destructible_v<T>) {
+        return 0;
+    } else {
+        return get_constructor_count<T>();
+    }
 }
 
 // Get the Nth non-default constructor
@@ -7229,6 +7423,21 @@ PyObject* py_new_with_init(PyTypeObject* type, PyObject* args, PyObject* kwds) {
         self->parent = nullptr;
     }
     return reinterpret_cast<PyObject*>(self);
+}
+
+// tp_new for a class whose destructor is not accessible. Installed whatever
+// else is true of the class -- constructors, a trampoline, an auto-trampoline
+// slot -- because each of those can build an object and none can free one: a
+// trampoline derived from a base with a protected destructor constructed
+// happily, was marked as owned, and leaked on every collection.
+template<typename T>
+PyObject* py_new_unfreeable(PyTypeObject* type, PyObject*, PyObject*) {
+    PyErr_Format(PyExc_TypeError,
+                 "%s cannot be constructed from Python: its C++ destructor is "
+                 "not accessible, so nothing could free it. Get one from the "
+                 "object that owns it",
+                 type->tp_name);
+    return nullptr;
 }
 
 // Fallback constructor for classes without parameterized constructors.
@@ -7756,6 +7965,22 @@ struct MethodNameCache {
     static constexpr auto names = compute_names();
 };
 
+// `std::vector<Node*> children()`. A container converts element by element
+// and there is no conversion for a raw pointer, so returning one was not a
+// declined method but a compile error for the module. It was always one; a
+// class with a private destructor used to be skipped before the compiler got
+// that far. A container of C strings is left alone: those do convert.
+template<typename C>
+consteval bool is_container_of_raw_pointers() {
+    if constexpr (!Container<C>) {
+        return false;
+    } else {
+        using Element = typename C::value_type;
+        return std::is_pointer_v<Element> &&
+               !std::is_same_v<std::remove_cv_t<std::remove_pointer_t<Element>>, char>;
+    }
+}
+
 // Can this return type cross into Python? Methods whose returns can't
 // (raw pointers, iterators, unconverted exotic types) are skipped the same
 // way param-unbindable methods are — real-world headers are full of them.
@@ -7781,6 +8006,20 @@ consteval bool return_type_convertible() {
             // Attribute(). `char*` stays refused: by convention that one is
             // the caller's to free, and copying it would leak.
             return std::is_same_v<Clean, const char*>;
+        } else if constexpr ((!std::is_reference_v<Ret> ||
+                              std::meta::has_template_arguments(std::meta::dealias(^^Clean))) &&
+                             mirror_bridge::core::value_cannot_be_destroyed(^^Clean)) {
+            // Returned by value, so the call site would have to destroy it.
+            // A reference to V itself is fine and is left alone; a reference
+            // to a wrapper of one (`const std::optional<V>&`) is not, because
+            // converting it still has to instantiate the wrapper.
+            // Asked before the container test below, which instantiates the
+            // type: std::optional<V> static_asserts on a V it cannot destroy.
+            // See core::value_cannot_be_destroyed for how a class gets a
+            // method like this and why it used to cost the module.
+            return false;
+        } else if constexpr (is_container_of_raw_pointers<Clean>()) {
+            return false;
         } else if constexpr (is_std_optional<Clean>::value || is_std_expected<Clean>::value ||
                              is_std_future<Clean>::value || is_std_function<Clean>::value ||
                              is_std_tuple_like<Clean>::value || is_std_variant<Clean>::value) {
@@ -7792,6 +8031,20 @@ consteval bool return_type_convertible() {
         } else {
             return mirror_bridge::core::is_convertible_type<Clean>();
         }
+    }
+}
+
+// The return gate for an instance method: everything the plain gate admits,
+// plus a pointer that can cross as a borrow kept alive by the receiver.
+template<typename T, std::size_t Index>
+consteval bool method_return_convertible() {
+    using Ret = typename [:get_method_return_type<T, Index>():];
+    if constexpr (return_type_convertible<Ret>()) {
+        return true;
+    } else if constexpr (!returns_borrowable_pointer<Ret>()) {
+        return false;
+    } else {
+        return !names_an_iterator_accessor(MethodNameCache<T>::names[Index]);
     }
 }
 
@@ -7823,7 +8076,55 @@ consteval bool method_fully_bindable() {
     } else if constexpr (!method_out_params_reach_caller<T, Index>()) {
         return false;
     } else {
-        return return_type_convertible<typename [:get_method_return_type<T, Index>():]>();
+        return method_return_convertible<T, Index>();
+    }
+}
+
+// Is declined method `Index` the const half of a pair whose non-const half
+// was bound: same name, same parameter types, differing in `const`?
+//
+// tinyxml2 declares such a pair for nearly every accessor
+// (`const XMLElement* FirstChildElement() const` beside the non-const one),
+// and only the non-const one can cross. The name is in the module and does
+// what C++ would do for a mutable object, so a "skipped method" line for the
+// const half reports a loss that did not happen -- eighty of them for
+// XMLElement, burying the methods that really are missing. This decides what
+// is REPORTED and nothing else: which overloads are bound is unaffected.
+//
+// One consteval loop over the cached method list, deliberately not a
+// template instantiated per pair, which for a class that size would be some
+// nine thousand instantiations.
+template<typename T, std::size_t Index>
+consteval bool is_const_twin_of_bound_method() {
+    constexpr std::size_t twin = [] consteval -> std::size_t {
+        const auto& methods = MemberFunctionCache<T>::methods;
+        const std::meta::info mine = methods[Index];
+        if (!std::meta::is_const(std::meta::type_of(mine))) return methods.size();
+        const auto my_params = std::meta::parameters_of(mine);
+        for (std::size_t other = 0; other < methods.size(); ++other) {
+            if (other == Index ||
+                MethodNameCache<T>::names[other] != MethodNameCache<T>::names[Index]) {
+                continue;
+            }
+            const std::meta::info theirs = methods[other];
+            if (std::meta::is_const(std::meta::type_of(theirs))) continue;
+            const auto their_params = std::meta::parameters_of(theirs);
+            if (their_params.size() != my_params.size()) continue;
+            bool same = true;
+            for (std::size_t i = 0; i < my_params.size() && same; ++i) {
+                // dealias: `size_t` in one declaration and `unsigned long` in
+                // the other are one parameter and two reflections.
+                same = std::meta::dealias(std::meta::type_of(my_params[i])) ==
+                       std::meta::dealias(std::meta::type_of(their_params[i]));
+            }
+            if (same) return other;
+        }
+        return methods.size();
+    }();
+    if constexpr (twin == MemberFunctionCache<T>::count) {
+        return false;
+    } else {
+        return method_fully_bindable<T, twin>();
     }
 }
 
@@ -7849,8 +8150,7 @@ consteval const char* method_decline_reason() {
         return "a parameter type has no conversion from Python";
     } else if constexpr (!method_out_params_reach_caller<T, Index>()) {
         return "it writes through a parameter whose writes cannot reach the caller";
-    } else if constexpr (!return_type_convertible<
-                             typename [:get_method_return_type<T, Index>():]>()) {
+    } else if constexpr (!method_return_convertible<T, Index>()) {
         return "its return type has no conversion to Python";
     } else {
         return "an overload of the same name was bound instead";
@@ -8167,7 +8467,7 @@ PyObject* invoke_with_n_args(PyWrapper<T>* wrapper, PyObject* const* resolved) {
                         forward_arg<method_param_t<T, FuncIndex, Is>>(std::get<Is>(cpp_args))...
                     );
                 });
-                return to_python_result(result);
+                return method_result_to_python(result, reinterpret_cast<PyObject*>(wrapper));
             }
         } catch (const std::exception& e) {
             set_py_error_from_cpp_exception(e);
@@ -8547,7 +8847,11 @@ auto generate_methods(const char* class_name, std::index_sequence<Indices...>) {
                     .ml_doc = nullptr
                 };
                 method_idx++;
-            } else if constexpr (!method_fully_bindable<T, Indices>()) {
+            } else if constexpr (!method_fully_bindable<T, Indices>() &&
+                                 !is_const_twin_of_bound_method<T, Indices>()) {
+                // The const half of a pair whose non-const half was bound is
+                // not a loss; see is_const_twin_of_bound_method.
+                //
                 // A declined method was reported nowhere: not on stderr, not
                 // in --json, not in the stub, and dir() simply does not list
                 // it. docs/guides/accelerating-python.md promises that
@@ -10309,6 +10613,63 @@ PyObject* to_python_member_view(Member& ref, PyObject* parent) {
     return reinterpret_cast<PyObject*>(wrapper);
 }
 
+// A wrapper over an object some other C++ object owns, reached through a
+// pointer an instance method returned. See "Pointer Returns" above for which
+// returns come here.
+template<typename Class>
+PyObject* borrow_into_python(Class* ptr, PyObject* receiver) {
+    // A null pointer is how these APIs say "there is none": FirstChildElement
+    // on a leaf, find() on a miss.
+    if (!ptr) Py_RETURN_NONE;
+
+    PyTypeObject* py_type = type_object_for<Class>();
+    if (!py_type) {
+        // Unlike a data member there is no snapshot to fall back on: a dict
+        // would silently turn "the library's object" into "a copy of it".
+        PyErr_Format(PyExc_TypeError,
+                     "this method returns a pointer to the C++ class '%s', "
+                     "which no loaded module binds",
+                     mirror_bridge::core::type_key<Class>);
+        return nullptr;
+    }
+
+    // Keep alive whatever keeps the receiver alive. A receiver that is itself
+    // a borrow or a view already names its owner, so the new wrapper takes
+    // that owner rather than the receiver: walking doc -> element -> child ->
+    // grandchild pins the document once per wrapper, not a chain of every
+    // node passed through on the way.
+    auto* receiver_view = reinterpret_cast<WrapperView*>(receiver);
+    PyObject* owner = receiver_view->parent ? receiver_view->parent : receiver;
+
+    // A back-pointer -- XMLNode::GetDocument(), b2Body::GetWorld() -- returns
+    // the owner itself, and a method written to be chained returns `this`.
+    // Either way the object already has a Python wrapper, and handing that
+    // one back keeps `node.tree() is tree` true, and keeps a Python subclass
+    // a subclass through a chain of calls. The type test is what makes
+    // reading cpp_object legal: `owner` can be any Python object that holds
+    // storage (a sequence view is not a PyWrapper), and only an instance of
+    // this type or of a subtype is known to begin with this layout. Equal
+    // addresses then mean the same object: a base subobject that sits
+    // anywhere but offset zero has a different address and gets a wrapper of
+    // its own.
+    for (PyObject* known : {receiver, owner}) {
+        if (PyObject_TypeCheck(known, py_type) &&
+            reinterpret_cast<WrapperView*>(known)->cpp_object == static_cast<void*>(ptr)) {
+            Py_INCREF(known);
+            return known;
+        }
+    }
+
+    auto* wrapper = reinterpret_cast<PyWrapper<Class>*>(py_type->tp_alloc(py_type, 0));
+    if (!wrapper) return nullptr;
+
+    wrapper->cpp_object = ptr;
+    wrapper->owns = false;
+    Py_INCREF(owner);
+    wrapper->parent = owner;
+    return reinterpret_cast<PyObject*>(wrapper);
+}
+
 template<typename T>
 std::enable_if_t<
     Bindable<T> && !StringLike<T> && !Container<T> && !Arithmetic<T> && !SmartPointer<T>,
@@ -11249,7 +11610,7 @@ void collect_stub_info(const char* class_name) {
     }
 
     // Constructors (bindable overloads only — what Python can actually call)
-    constexpr std::size_t ctor_count = get_constructor_count<T>();
+    constexpr std::size_t ctor_count = callable_constructor_count<T>();
     if constexpr (ctor_count > 0) {
         [&]<std::size_t... Cs>(std::index_sequence<Cs...>) {
             (collect_ctor_stub<T, Cs>(class_name), ...);
@@ -11385,7 +11746,7 @@ BoundClass<T> bind_class(PyObject* module, const char* name,
     static auto static_methods = generate_static_methods<T>(std::make_index_sequence<static_method_count>{});
 
     // Check if class has parameterized constructors
-    constexpr std::size_t ctor_count = get_constructor_count<T>();
+    constexpr std::size_t ctor_count = callable_constructor_count<T>();
 
     // Store class name statically for repr
     static const char* class_name = name;
@@ -11509,7 +11870,8 @@ BoundClass<T> bind_class(PyObject* module, const char* name,
         // With a parameterized constructor the object is built in tp_init, so
         // that is where the auto slot has to go; with only a default one it is
         // built here. Exactly one of the two is ever the auto variant.
-        .tp_new = (ctor_count > 0) ? py_new_with_init<T>
+        .tp_new = !std::is_destructible_v<T> ? (newfunc)py_new_unfreeable<T>
+                : (ctor_count > 0) ? py_new_with_init<T>
                 : (autos && autos->tp_new) ? autos->tp_new
                 : (newfunc)py_new<T, Trampoline>,
     };
@@ -11742,15 +12104,6 @@ BoundClass<T> bind_class_when_bindable(PyObject* module, const char* name) {
         std::fprintf(stderr,
             "mirror_bridge: skipped '%s' (not bindable: no reflectable "
             "members/methods)\n", name);
-        return {nullptr};
-    } else if constexpr (!std::is_destructible_v<std::remove_cvref_t<T>>) {
-        // A private or deleted destructor means tp_dealloc cannot free the
-        // object, so there is no wrapper to make. tinyxml2::XMLElement is the
-        // case: binding it failed the entire module on a class the library
-        // deliberately makes undestroyable from outside.
-        std::fprintf(stderr,
-            "mirror_bridge: skipped '%s' (its destructor is not accessible, so "
-            "a wrapper could not free it)\n", name);
         return {nullptr};
     } else if constexpr (!core::validate_bindable_members<T>()) {
         std::fprintf(stderr,
