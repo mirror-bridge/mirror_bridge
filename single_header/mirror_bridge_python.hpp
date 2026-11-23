@@ -5823,6 +5823,20 @@ PyObject* vector_to_numpy_view(std::vector<T>& vec, PyObject* owner) {
     return create_buffer_view(vec, owner);
 }
 
+// Whether a class is named the way the standard reserves for the
+// implementation: two leading underscores, an underscore and a capital, or
+// any leading underscore at global scope. FILE is `_IO_FILE` in glibc,
+// `__sFILE` on macOS and `_iobuf` in the Microsoft runtime, and is the
+// reason this exists; see returns_borrowable_pointer.
+consteval bool names_implementation_class(std::meta::info type) {
+    type = std::meta::dealias(type);
+    if (!std::meta::has_identifier(type)) return false;
+    const std::string_view name = std::meta::identifier_of(type);
+    if (name.size() < 2 || name[0] != '_') return false;
+    if (name[1] == '_' || (name[1] >= 'A' && name[1] <= 'Z')) return true;
+    return std::meta::parent_of(type) == ^^::;
+}
+
 // ============================================================================
 // Pointer Returns: Borrowed Objects
 // ============================================================================
@@ -5898,7 +5912,14 @@ consteval bool returns_borrowable_pointer() {
             // call. This used to ask that every member of the pointee
             // convert, because a class with one that did not could never be
             // bound. It can now: the member is what is left out.
-            return true;
+            //
+            // That question had a second job, which was keeping `FILE*` out:
+            // FILE is a struct full of raw pointers. What is left to
+            // recognise it by is its name. No header a person wants bound
+            // declares a class whose name is reserved for the implementation,
+            // and a method that takes or returns one is better absent than
+            // present and raising at every call.
+            return !names_implementation_class(^^Pointee);
         }
     }
 }

@@ -86,7 +86,12 @@ else:
 assert pickle.loads(pickle.dumps(m.Engine())).rpm == 900
 print("  ✓ refused, where a class with every member carried round-trips")
 
-print("Test 9: the members left out are named, when asked...")
+print("Test 9: a pointer to a class of the C library is still not a borrow...")
+log = m.Log()
+assert public(log) == ["lines"], public(log)
+print("  ✓ the two FILE* methods are absent, not present and raising")
+
+print("Test 10: the members left out are named, when asked...")
 here = os.path.dirname(os.path.abspath(__file__))
 build = os.path.join(here, "..", "..", "build")
 code = "import sys; sys.path.insert(0, %r); import declined_members" % build
@@ -104,6 +109,7 @@ for name in ("FixtureDef::shape", "FixtureDef::user_data", "IO::set_clipboard",
         "%s was left out and not named:\n%s" % (name, loud.stderr)
 # Someone asked for that one to be left out; reporting it would be noise.
 assert "Marked::secret" not in loud.stderr, loud.stderr
+assert "skipped method 'Log::handle'" in loud.stderr and "skipped method 'Log::attach'" in loud.stderr
 print("  ✓ quiet by default, seven members named, the annotated one not among them")
 
 print("\nAll declined-member tests passed!")

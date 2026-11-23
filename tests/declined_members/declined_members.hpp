@@ -1,4 +1,6 @@
 #pragma once
+#include <cstdio>
+
 #include "python/mirror_bridge_annotations.hpp"
 
 // A data member with no conversion must cost itself and not its class.
@@ -72,6 +74,16 @@ struct World {
     FixtureDef copy() const { return def; }
     void apply(const FixtureDef& other) { def = other; }
     void attach() { def.shape = &engine; }
+};
+
+// FILE is a struct full of raw pointers, and "every member converts" was
+// what kept a pointer to one from being taken for a pointer to a bindable
+// class. With that question gone it has to be recognised some other way, or
+// these two methods are present and raise at every call.
+struct Log {
+    int lines = 0;
+    FILE* handle() { return stdout; }
+    void attach(FILE* stream) { (void)stream; ++lines; }
 };
 
 }  // namespace dm

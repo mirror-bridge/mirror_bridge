@@ -13,4 +13,5 @@ MIRROR_BRIDGE_MODULE(declined_members,
     mirror_bridge::bind_class_when_bindable<dm::Handles>(m, "Handles");
     mirror_bridge::bind_class<dm::Marked>(m, "Marked");
     mirror_bridge::bind_class_when_bindable<dm::World>(m, "World");
+    mirror_bridge::bind_class_when_bindable<dm::Log>(m, "Log");
 )
