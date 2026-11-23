@@ -716,6 +716,14 @@ std::string type_hint() {
         return "str";
     } else if constexpr (std::is_void_v<CleanT>) {
         return "None";
+    } else if constexpr (std::is_array_v<CleanT>) {
+        // A C array member. A char buffer crosses as the string it holds and
+        // any other array as a list of its elements, one level per extent.
+        if constexpr (std::is_same_v<std::remove_cv_t<std::remove_extent_t<CleanT>>, char>) {
+            return "str";
+        } else {
+            return "list[" + type_hint<std::remove_extent_t<CleanT>, P>() + "]";
+        }
     } else if constexpr (std::is_pointer_v<CleanT>) {
         // The only other pointer that gets bound is a pointer to a class.
         // Returned by an instance method it crosses as a borrow of that

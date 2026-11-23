@@ -18,6 +18,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1401,6 +1402,56 @@ struct is_container<T, std::void_t<
     decltype(std::declval<T>().size())
 >> : std::bool_constant<!std::is_same_v<T, std::string> &&
                          !std::is_same_v<T, std::string_view>> {};
+
+// ============================================================================
+// C Array Members
+// ============================================================================
+//
+// `float rgba[4]`, `int cells[3][3]`, `char name[64]`. is_convertible_type
+// below says yes to one whenever its element converts, which every backend
+// then has to make true. These are the parts of doing so that do not depend
+// on the language, kept here so three backends cannot each get them slightly
+// differently.
+
+// A fixed char buffer is how a C-style struct holds a string, so it crosses
+// as the language's string and not as a sequence of N integers.
+template<typename T>
+inline constexpr bool is_char_buffer_v =
+    std::is_array_v<T> && std::is_same_v<std::remove_cv_t<std::remove_extent_t<T>>, char>;
+
+// How many bytes of text the buffer holds: up to the first NUL, or all N. A
+// buffer filled to the brim with no terminator is legal C and must not be
+// read past, which is what strlen would do.
+template<std::size_t N>
+std::size_t char_buffer_length(const char (&buffer)[N]) {
+    const void* terminator = std::memchr(buffer, '\0', N);
+    return terminator ? static_cast<std::size_t>(static_cast<const char*>(terminator) - buffer) : N;
+}
+
+// Copies `size` bytes in, or refuses if they and a terminator do not fit.
+// Never a truncation: a path or a name cut short without a word is the bug
+// this type is known for. The tail is zeroed so nothing of the previous
+// value survives behind the new terminator.
+template<std::size_t N>
+bool fill_char_buffer(char (&buffer)[N], const char* bytes, std::size_t size) {
+    if (size >= N) return false;
+    std::memcpy(buffer, bytes, size);
+    std::memset(buffer + size, 0, N - size);
+    return true;
+}
+
+// Stores a converted value into a data member. An array cannot be assigned as
+// a whole, so it is assigned element by element, through every extent.
+template<typename Member>
+void assign_member(Member& member, Member& converted) {
+    if constexpr (std::is_array_v<Member>) {
+        for (std::size_t i = 0; i < std::extent_v<Member>; ++i) {
+            assign_member(member[i], converted[i]);
+        }
+    } else {
+        member = std::move(converted);
+    }
+}
 
 // Checks if a type is convertible by mirror_bridge
 template<typename T>
