@@ -70,6 +70,17 @@ concept HasCustomLuaConverter = requires {
     { CustomLuaConverter<T>::has_custom_conversion } -> std::convertible_to<bool>;
 } && CustomLuaConverter<T>::has_custom_conversion;
 
+}  // namespace lua
+
+// Tells core's gates, which is what lets such a type be a data member.
+namespace core {
+template<typename T>
+    requires ::mirror_bridge::lua::HasCustomLuaConverter<T>
+inline constexpr bool has_custom_conversion<T> = true;
+}
+
+namespace lua {
+
 // The two overloads that route to a CustomLuaConverter specialization are
 // defined after the composite converters, further down, on purpose: see the
 // note at the end of the declaration block.
@@ -1949,7 +1960,8 @@ template<Bindable T>
 void bind_class(lua_State* L, const char* name) {
     static_assert(core::validate_bindable_members<T>(),
         "bind_class<T>: T has a data member whose type mirror_bridge cannot convert. "
-        "Add a custom type converter for it, or bind the class with "
+        "Add a custom type converter for it (and, if that converter is a plain overload, "
+        "say so with core::has_custom_conversion<Type> = true), or bind the class with "
         "bind_class_when_bindable<T>, which leaves such a member out and binds the rest. "
         "[[=exclude{}]] will not help here: this backend does not read annotations yet.");
     bind_class_impl<T>(L, name);

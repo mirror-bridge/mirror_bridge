@@ -54,6 +54,7 @@ struct Derived : Base {
 struct Handles {
     void* first = nullptr;
     void* second = nullptr;
+    static inline void* registry = nullptr;   // a static is left out the same way
     int count() const { return 2; }
 };
 
@@ -74,6 +75,19 @@ struct World {
     FixtureDef copy() const { return def; }
     void apply(const FixtureDef& other) { def = other; }
     void attach() { def.shape = &engine; }
+};
+
+// The C idiom for naming a struct. `_Item` is a name the standard reserves,
+// and a rule that recognised FILE by its reserved name (`_IO_FILE`) caught
+// this too: get() and take() silently stopped being bound.
+typedef struct _Item {
+    int x = 1;
+} Item;
+
+struct Tray {
+    Item item;
+    Item* get() { return &item; }
+    void take(Item* other) { if (other) item = *other; }
 };
 
 // FILE is a struct full of raw pointers, and "every member converts" was

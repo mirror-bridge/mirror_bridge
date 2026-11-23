@@ -102,6 +102,13 @@ mirror_bridge::bind_class_when_bindable<ThirdParty>(m, "ThirdParty");
 
 (`mirror_bridge::lua::` and `mirror_bridge::javascript::` have the same function. Those two backends do not read annotations, so there it is the only way.)
 
+If the member's type has a converter of your own, it is not unconvertible, and the gate needs to know. A specialization of `CustomTypeConverter`, `CustomLuaConverter` or `CustomJsConverter` tells it by existing. A converter written as plain `to_lua`/`from_lua` or `to_javascript`/`from_javascript` overloads cannot be seen, so say it beside them:
+
+```cpp
+template<>
+inline constexpr bool mirror_bridge::core::has_custom_conversion<Bag<Node*>> = true;
+```
+
 The member is still part of the C++ object. Copies made on the C++ side carry it; the class does not pickle, because the state could not hold it.
 
 To pinpoint which class fails before reaching `bind_class`, drop in the validator at the definition site:

@@ -1811,12 +1811,29 @@ inline constexpr bool is_array_of_borrowed_text_v =
     (std::is_same_v<std::remove_cv_t<std::remove_all_extents_t<T>>, const char*> ||
      std::is_same_v<std::remove_cv_t<std::remove_all_extents_t<T>>, std::string_view>);
 
+// A type converted by a converter of the caller's own, which the rules below
+// know nothing about and must not second-guess: with one, a handle type or a
+// container of raw pointers crosses, and without one it does not.
+//
+// Each backend sets this for a type with a specialization of its converter
+// struct (CustomTypeConverter, CustomLuaConverter, CustomJsConverter). Lua and
+// JavaScript also accept a converter written as plain to_lua/from_lua or
+// to_javascript/from_javascript overloads, which nothing here can detect, so
+// for a type the rules would refuse it is said in one line beside them:
+//
+//   template<> inline constexpr bool
+//       mirror_bridge::core::has_custom_conversion<Bag<Node*>> = true;
+template<typename T>
+inline constexpr bool has_custom_conversion = false;
+
 // Checks if a type is convertible by mirror_bridge
 template<typename T>
 consteval bool is_convertible_type() {
     using U = std::remove_cvref_t<T>;
 
-    if constexpr (carries_nested_raw_pointer<U>()) {
+    if constexpr (has_custom_conversion<U>) {
+        return true;
+    } else if constexpr (carries_nested_raw_pointer<U>()) {
         // Asked first: the arms below answer for the outer type alone, and
         // "a container converts" is not true of std::vector<Node*>.
         return false;
@@ -1853,7 +1870,8 @@ consteval bool is_convertible_type() {
         // recognisable as one here, by its value_type: Dear ImGui's
         // ImVector<ImFont*> is not in std, so that walk rightly leaves its
         // arguments alone, and it then reached the element conversion with a
-        // pointer nothing converts.
+        // pointer nothing converts. A container with a converter of its own
+        // never gets here: see has_custom_conversion.
         return !carries_raw_pointer<typename U::value_type>();
     } else if constexpr (Bindable<U>) {
         return true;
@@ -5553,6 +5571,13 @@ concept HasCustomConverter = requires {
     { CustomTypeConverter<T>::has_custom_conversion } -> std::convertible_to<bool>;
 } && CustomTypeConverter<T>::has_custom_conversion;
 
+// Tells core's gates, which is what lets such a type be a data member.
+namespace core {
+template<typename T>
+    requires ::mirror_bridge::HasCustomConverter<T>
+inline constexpr bool has_custom_conversion<T> = true;
+}
+
 // Convert using custom converter if available
 template<typename T>
     requires HasCustomConverter<T>
@@ -5825,20 +5850,6 @@ PyObject* vector_to_numpy_view(std::vector<T>& vec, PyObject* owner) {
     return create_buffer_view(vec, owner);
 }
 
-// Whether a class is named the way the standard reserves for the
-// implementation: two leading underscores, an underscore and a capital, or
-// any leading underscore at global scope. FILE is `_IO_FILE` in glibc,
-// `__sFILE` on macOS and `_iobuf` in the Microsoft runtime, and is the
-// reason this exists; see returns_borrowable_pointer.
-consteval bool names_implementation_class(std::meta::info type) {
-    type = std::meta::dealias(type);
-    if (!std::meta::has_identifier(type)) return false;
-    const std::string_view name = std::meta::identifier_of(type);
-    if (name.size() < 2 || name[0] != '_') return false;
-    if (name[1] == '_' || (name[1] >= 'A' && name[1] <= 'Z')) return true;
-    return std::meta::parent_of(type) == ^^::;
-}
-
 // ============================================================================
 // Pointer Returns: Borrowed Objects
 // ============================================================================
@@ -5908,24 +5919,16 @@ consteval bool returns_borrowable_pointer() {
             return false;
         } else if constexpr (!NestedBindable<Pointee>) {
             return false;
-        } else if constexpr (names_implementation_class(^^Pointee)) {
+        } else if constexpr (std::is_same_v<Pointee, std::FILE>) {
             // "Every member of the pointee converts" used to be asked here,
             // because a class with a member that did not could never be
-            // bound. It can now: the member is what is left out. But that
-            // question had a second job, which was keeping `FILE*` out, FILE
-            // being a struct full of raw pointers. What is left to recognise
-            // it by is its name. No header a person wants bound declares a
-            // class whose name is reserved for the implementation, and a
-            // method that takes or returns one is better absent than present
-            // and raising at every call.
-            //
-            // Asked in an `if constexpr` arm like the questions above it, and
-            // not as `return !names_implementation_class(^^Pointee)`. With
-            // the reflection of a local alias in a plain return, GCC 16
-            // answered `if constexpr (returns_borrowable_pointer<R>())` false
-            // inside invoke_with_n_args while a constexpr variable holding
-            // the same call was true, and a method returning its own
-            // argument stopped giving that argument back.
+            // bound. It can now: the member is what is left out. That
+            // question also happened to keep `FILE*` out, FILE being a
+            // struct full of raw pointers, and FILE is the one such type
+            // common enough to keep refusing by name: a method that takes or
+            // returns one is better absent than present and raising at every
+            // call. (Recognising it by its reserved name, `_IO_FILE`, was
+            // tried and caught every `typedef struct _Item { ... } Item;`.)
             return false;
         } else {
             // A borrow is only ever a wrapper of a bound class, and whether
@@ -12532,7 +12535,7 @@ BoundClass<T> bind_class(PyObject* module, const char* name,
     // nobody can annotate a third-party header.
     static_assert(annotations::count_declined_members<T>() == 0,
         "bind_class<T>: T has a data member whose type mirror_bridge cannot convert. "
-        "Mark it [[=exclude{}]], add a custom type converter, or bind the class with "
+        "Mark it [[=exclude{}]], give its type a CustomTypeConverter, or bind the class with "
         "bind_class_when_bindable<T>, which leaves such a member out and binds the rest. "
         "Supported: arithmetic, std::string, containers, smart pointers, "
         "std::optional, std::expected, enums, C arrays and nested bindable classes.");
@@ -12815,6 +12818,13 @@ BoundClass<T> bind_class_impl(PyObject* module, const char* name,
                         // attribute. Left pending, the error would surface
                         // from whatever C API call the import makes next.
                         PyErr_Clear();
+                    }
+                } else {
+                    constexpr auto declined_static = get_static_data_member_name<T, Is>();
+                    if (report_declined_methods()) {
+                        std::fprintf(stderr,
+                            "mirror_bridge: skipped member '%s::%s' (its type has no conversion)\n",
+                            name, declined_static);
                     }
                 }
             }(), ...);

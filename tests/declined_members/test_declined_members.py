@@ -90,6 +90,16 @@ print("Test 9: a pointer to a class of the C library is still not a borrow...")
 log = m.Log()
 assert public(log) == ["lines"], public(log)
 print("  ✓ the two FILE* methods are absent, not present and raising")
+# ...and nothing wider than FILE. `typedef struct _Item {...} Item;` has a
+# reserved name too, and is an ordinary class of the library.
+tray = m.Tray()
+tray.get().x = 9
+assert tray.item.x == 9, "the borrow of a typedef'd struct did not write through"
+other = m.Item()
+other.x = 4
+tray.take(other)
+assert tray.get().x == 4
+print("  ✓ a struct named the C way is still borrowed and still taken by pointer")
 
 print("Test 10: the members left out are named, when asked...")
 here = os.path.dirname(os.path.abspath(__file__))
@@ -104,12 +114,13 @@ assert "skipped member" not in quiet.stderr, quiet.stderr
 loud = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                       env=dict(os.environ, MIRROR_BRIDGE_REPORT_DECLINED="1"))
 for name in ("FixtureDef::shape", "FixtureDef::user_data", "IO::set_clipboard",
-             "IO::handler", "Base::raw", "Handles::first", "Handles::second"):
+             "IO::handler", "Base::raw", "Handles::first", "Handles::second",
+             "Handles::registry"):
     assert "skipped member '%s'" % name in loud.stderr, \
         "%s was left out and not named:\n%s" % (name, loud.stderr)
 # Someone asked for that one to be left out; reporting it would be noise.
 assert "Marked::secret" not in loud.stderr, loud.stderr
 assert "skipped method 'Log::handle'" in loud.stderr and "skipped method 'Log::attach'" in loud.stderr
-print("  ✓ quiet by default, seven members named, the annotated one not among them")
+print("  ✓ quiet by default, seven members and a static named, the annotated one not among them")
 
 print("\nAll declined-member tests passed!")

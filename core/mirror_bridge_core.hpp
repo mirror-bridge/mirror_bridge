@@ -1605,12 +1605,29 @@ inline constexpr bool is_array_of_borrowed_text_v =
     (std::is_same_v<std::remove_cv_t<std::remove_all_extents_t<T>>, const char*> ||
      std::is_same_v<std::remove_cv_t<std::remove_all_extents_t<T>>, std::string_view>);
 
+// A type converted by a converter of the caller's own, which the rules below
+// know nothing about and must not second-guess: with one, a handle type or a
+// container of raw pointers crosses, and without one it does not.
+//
+// Each backend sets this for a type with a specialization of its converter
+// struct (CustomTypeConverter, CustomLuaConverter, CustomJsConverter). Lua and
+// JavaScript also accept a converter written as plain to_lua/from_lua or
+// to_javascript/from_javascript overloads, which nothing here can detect, so
+// for a type the rules would refuse it is said in one line beside them:
+//
+//   template<> inline constexpr bool
+//       mirror_bridge::core::has_custom_conversion<Bag<Node*>> = true;
+template<typename T>
+inline constexpr bool has_custom_conversion = false;
+
 // Checks if a type is convertible by mirror_bridge
 template<typename T>
 consteval bool is_convertible_type() {
     using U = std::remove_cvref_t<T>;
 
-    if constexpr (carries_nested_raw_pointer<U>()) {
+    if constexpr (has_custom_conversion<U>) {
+        return true;
+    } else if constexpr (carries_nested_raw_pointer<U>()) {
         // Asked first: the arms below answer for the outer type alone, and
         // "a container converts" is not true of std::vector<Node*>.
         return false;
@@ -1647,7 +1664,8 @@ consteval bool is_convertible_type() {
         // recognisable as one here, by its value_type: Dear ImGui's
         // ImVector<ImFont*> is not in std, so that walk rightly leaves its
         // arguments alone, and it then reached the element conversion with a
-        // pointer nothing converts.
+        // pointer nothing converts. A container with a converter of its own
+        // never gets here: see has_custom_conversion.
         return !carries_raw_pointer<typename U::value_type>();
     } else if constexpr (Bindable<U>) {
         return true;

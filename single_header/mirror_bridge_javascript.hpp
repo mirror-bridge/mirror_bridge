@@ -1811,12 +1811,29 @@ inline constexpr bool is_array_of_borrowed_text_v =
     (std::is_same_v<std::remove_cv_t<std::remove_all_extents_t<T>>, const char*> ||
      std::is_same_v<std::remove_cv_t<std::remove_all_extents_t<T>>, std::string_view>);
 
+// A type converted by a converter of the caller's own, which the rules below
+// know nothing about and must not second-guess: with one, a handle type or a
+// container of raw pointers crosses, and without one it does not.
+//
+// Each backend sets this for a type with a specialization of its converter
+// struct (CustomTypeConverter, CustomLuaConverter, CustomJsConverter). Lua and
+// JavaScript also accept a converter written as plain to_lua/from_lua or
+// to_javascript/from_javascript overloads, which nothing here can detect, so
+// for a type the rules would refuse it is said in one line beside them:
+//
+//   template<> inline constexpr bool
+//       mirror_bridge::core::has_custom_conversion<Bag<Node*>> = true;
+template<typename T>
+inline constexpr bool has_custom_conversion = false;
+
 // Checks if a type is convertible by mirror_bridge
 template<typename T>
 consteval bool is_convertible_type() {
     using U = std::remove_cvref_t<T>;
 
-    if constexpr (carries_nested_raw_pointer<U>()) {
+    if constexpr (has_custom_conversion<U>) {
+        return true;
+    } else if constexpr (carries_nested_raw_pointer<U>()) {
         // Asked first: the arms below answer for the outer type alone, and
         // "a container converts" is not true of std::vector<Node*>.
         return false;
@@ -1853,7 +1870,8 @@ consteval bool is_convertible_type() {
         // recognisable as one here, by its value_type: Dear ImGui's
         // ImVector<ImFont*> is not in std, so that walk rightly leaves its
         // arguments alone, and it then reached the element conversion with a
-        // pointer nothing converts.
+        // pointer nothing converts. A container with a converter of its own
+        // never gets here: see has_custom_conversion.
         return !carries_raw_pointer<typename U::value_type>();
     } else if constexpr (Bindable<U>) {
         return true;
@@ -2023,6 +2041,17 @@ template<typename T>
 concept HasCustomJsConverter = requires {
     { CustomJsConverter<T>::has_custom_conversion } -> std::convertible_to<bool>;
 } && CustomJsConverter<T>::has_custom_conversion;
+
+}  // namespace javascript
+
+// Tells core's gates, which is what lets such a type be a data member.
+namespace core {
+template<typename T>
+    requires ::mirror_bridge::javascript::HasCustomJsConverter<T>
+inline constexpr bool has_custom_conversion<T> = true;
+}
+
+namespace javascript {
 
 // The two overloads that route to a CustomJsConverter specialization are
 // defined after the composite converters, further down, on purpose: see the
@@ -3839,7 +3868,8 @@ template<Bindable T>
 napi_value bind_class(napi_env env, napi_value exports, const char* name) {
     static_assert(core::validate_bindable_members<T>(),
         "bind_class<T>: T has a data member whose type mirror_bridge cannot convert. "
-        "Add a custom type converter for it, or bind the class with "
+        "Add a custom type converter for it (and, if that converter is a plain overload, "
+        "say so with core::has_custom_conversion<Type> = true), or bind the class with "
         "bind_class_when_bindable<T>, which leaves such a member out and binds the rest. "
         "[[=exclude{}]] will not help here: this backend does not read annotations yet.");
     return bind_class_impl<T>(env, exports, name);

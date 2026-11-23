@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 
 // A simple RGB color type that we'll convert to/from language-native types
 // This simulates third-party types like Eigen::Vector3d
@@ -39,4 +41,30 @@ struct Pixel {
     Color3 inverted_color() const {
         return Color3(255 - color.r, 255 - color.g, 255 - color.b);
     }
+};
+
+// A container of the library's own that holds raw pointers, converted by
+// plain overloads like Color3 above. Nothing in mirror_bridge can convert a
+// Tag* element, so without a converter a member of this type is left out of
+// its class. With one it crosses, and since a plain overload is not something
+// the member gate can see, the binding says so in one line (see
+// pixel_binding.cpp).
+struct Tag {
+    int id = 0;
+};
+
+template<typename T>
+struct Bag {
+    using value_type = T;
+    std::vector<T> items;
+    auto begin() const { return items.begin(); }
+    auto end() const { return items.end(); }
+    std::size_t size() const { return items.size(); }
+};
+
+struct Scene {
+    Tag first{7};
+    Tag second{9};
+    Bag<Tag*> tags{{&first, &second}};
+    int count = 2;
 };

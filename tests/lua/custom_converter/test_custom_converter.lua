@@ -79,6 +79,16 @@ for _, expected in ipairs(test_colors) do
 end
 print(string.format("  All %d round-trip tests passed", #test_colors))
 
+-- A member whose type the gate would refuse, kept by its custom converter
+print("\nTest: a container of raw pointers with a converter of its own...")
+local scene = pixel.Scene()
+assert(scene.count == 2)
+local tags = scene.tags
+assert(type(tags) == "table" and #tags == 2 and tags[1] == 7 and tags[2] == 9,
+    "Bag<Tag*> should cross through its own converter")
+assert(not pcall(function() scene.tags = {1, 2} end), "the converter refuses writes")
+print("  Scene.tags crossed as {7, 9}")
+
 print("\n" .. string.rep("=", 40))
 print("All custom type converter tests passed!")
 print(string.rep("=", 40))
