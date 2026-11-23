@@ -27,10 +27,13 @@ def main():
     for aliased in ("val_i", "val_f", "val_p"):
         assert not hasattr(p, aliased), aliased
 
-    # A class naming a forward-declared type declines -- its `Opaque*` member
-    # has no converter -- and says so at import. What matters is that it costs
-    # only itself: the module imports and everything beside it works.
-    assert not hasattr(cs, "HoldsOpaque")
+    # A class naming a forward-declared type: its `Opaque*` member has no
+    # conversion. That used to cost the class; now it costs the member, and
+    # the class binds with what is left. Either way the module imports and
+    # everything beside it works, which is what this fixture is about.
+    h = cs.HoldsOpaque()
+    assert h.size == 3
+    assert not hasattr(h, "handle")
     assert not hasattr(cs, "Opaque")
 
     # A null `const char*` reads as None rather than taking the interpreter
