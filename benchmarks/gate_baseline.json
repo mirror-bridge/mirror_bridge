@@ -1,0 +1,4 @@
+{
+  "_comment": "The commit of this repository that the runtime regression gate measures HEAD against. run_all_benchmarks.sh builds the benchmark module from this commit's own sources and times it in the same job as HEAD; check_ratios.py fails if HEAD is slower beyond its tolerance. Move it deliberately: forward after an improvement lands (so the improvement becomes the thing to keep), or to the commit that accepts a slowdown, or when the benchmarked operations change. Never move it to make a red build green.",
+  "commit": "fc5aa00a4ab5971d198e77fd1a952beed051933b"
+}
