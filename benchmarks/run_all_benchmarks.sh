@@ -427,11 +427,90 @@ cd "$BENCHMARK_DIR/runtime/python"
 echo "Building runtime benchmark modules..."
 echo ""
 
-clang++ -std=c++2c -freflection -freflection-latest -stdlib=libc++ \
-    -O3 -DNDEBUG \
-    -I"$PROJECT_ROOT" -I"$BENCHMARK_DIR/runtime/shared" -fPIC -shared \
-    $(python3-config --includes --ldflags) \
-    mirror_bridge_binding.cpp -o "$BUILD_DIR/bench_mb.so" 2>&1 | grep -v "mixture of designated" || true
+# One compile command for HEAD and for the gate's baseline. The gate divides
+# one module's timings by the other's, so a flag that differed between the two
+# builds would be reported as a regression, or hide one.
+#   $1  root of the source tree to build from
+#   $2  output module
+build_mirror_bridge_bench() {
+    local root=$1 out=$2
+    rm -f "$out"
+    clang++ -std=c++2c -freflection -freflection-latest -stdlib=libc++ \
+        -O3 -DNDEBUG \
+        -I"$root" -I"$root/benchmarks/runtime/shared" -fPIC -shared \
+        $(python3-config --includes --ldflags) \
+        "$root/benchmarks/runtime/python/mirror_bridge_binding.cpp" -o "$out" 2>&1 | grep -v "mixture of designated" || true
+}
+
+build_mirror_bridge_bench "$PROJECT_ROOT" "$BUILD_DIR/bench_mb.so"
+
+# The regression gate (check_ratios.py) compares HEAD with mirror_bridge at the
+# commit named in gate_baseline.json, built here and timed below in the same
+# run. The module is built from that commit's own tree -- its headers, its
+# binding file, its benchmark class -- into a directory of its own, because
+# its init symbol is PyInit_bench_mb just like HEAD's and only the path tells
+# the two apart.
+#
+# Nothing in here may abort the suite. A baseline that cannot be fetched or no
+# longer compiles is a reason for the gate to fail, and it does, by name; it is
+# not a reason to lose the month's table. So every failure is recorded in
+# status.json, which the runner copies into the results for the gate to print.
+#
+# MB_GATE_BASELINE_ROOT points at an already checked-out tree to use instead,
+# for asking "did my change slow anything down" against another worktree.
+GATE_BASELINE_DIR="$BUILD_DIR/gate_baseline"
+
+build_gate_baseline() {
+    local sha tree="" scratch="" reason=""
+    rm -rf "$GATE_BASELINE_DIR"
+    mkdir -p "$GATE_BASELINE_DIR"
+
+    sha=$(python3 -c 'import json, re, sys
+commit = json.load(open(sys.argv[1]))["commit"]
+assert re.fullmatch("[0-9a-f]{40}", commit)
+print(commit)' "$BENCHMARK_DIR/gate_baseline.json" 2>/dev/null) || sha=""
+
+    if [ -n "${MB_GATE_BASELINE_ROOT:-}" ]; then
+        tree="$MB_GATE_BASELINE_ROOT"
+        sha="local tree $tree"
+        [ -d "$tree" ] || reason="MB_GATE_BASELINE_ROOT=$tree is not a directory"
+    elif [ -z "$sha" ]; then
+        reason="benchmarks/gate_baseline.json does not name a full 40-character commit"
+    else
+        # CI checks out one commit deep, so the baseline is usually not in the
+        # object store yet. Fetching by SHA needs no branch or tag to exist.
+        if ! git -C "$PROJECT_ROOT" cat-file -e "$sha^{commit}" 2>/dev/null; then
+            git -C "$PROJECT_ROOT" fetch --quiet --depth 1 origin "$sha" || true
+        fi
+        if ! git -C "$PROJECT_ROOT" cat-file -e "$sha^{commit}" 2>/dev/null; then
+            reason="commit $sha is not in this checkout and could not be fetched from origin"
+        else
+            scratch=$(mktemp -d)
+            tree="$scratch"
+            if ! git -C "$PROJECT_ROOT" archive "$sha" | tar -x -C "$tree"; then
+                reason="commit $sha could not be extracted with git archive"
+            fi
+        fi
+    fi
+
+    if [ -z "$reason" ]; then
+        echo "Building the gate baseline from $sha..."
+        build_mirror_bridge_bench "$tree" "$GATE_BASELINE_DIR/bench_mb.so"
+        if [ ! -f "$GATE_BASELINE_DIR/bench_mb.so" ]; then
+            reason="the benchmark module at $sha did not compile with this toolchain"
+        fi
+    fi
+    [ -n "$scratch" ] && rm -rf "$scratch"
+
+    if [ -n "$reason" ]; then
+        echo -e "${YELLOW}Gate baseline unavailable: $reason${NC}"
+    fi
+    python3 -c 'import json, sys
+json.dump({"commit": sys.argv[2], "reason": sys.argv[3] or None}, open(sys.argv[1], "w"))' \
+        "$GATE_BASELINE_DIR/status.json" "$sha" "$reason"
+}
+
+build_gate_baseline
 
 clang++ -std=c++20 -stdlib=libc++ \
     -O3 -DNDEBUG \
@@ -490,7 +569,8 @@ echo ""
 
 echo "Running runtime benchmarks (this may take a few minutes)..."
 export LD_LIBRARY_PATH=/usr/local/lib/aarch64-unknown-linux-gnu:/usr/local/lib/x86_64-unknown-linux-gnu:$LD_LIBRARY_PATH
-python3 run_runtime_benchmarks.py run
+MB_BENCH_BUILD="$BUILD_DIR" MB_BENCH_BASELINE_BUILD="$GATE_BASELINE_DIR" \
+    python3 run_runtime_benchmarks.py run
 
 # ============================================================================
 # PART 3: Trading Workloads
@@ -556,6 +636,6 @@ echo ""
 echo "Results summary:"
 echo "  - Compile-time results: See above"
 echo "  - Runtime results: See above table"
-echo "  - Detailed runtime data: benchmarks/runtime/runtime_results.json"
+echo "  - Detailed runtime data: benchmarks/runtime/python/runtime_results.json"
 echo "  - Trading workloads:     benchmarks/runtime/python/trading_results.json"
 echo ""

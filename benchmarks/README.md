@@ -276,20 +276,58 @@ Caches are cleared between runs using `sync` and `drop_caches`.
 
 ### Runtime Benchmarks
 
-Each operation is:
-1. **Warmed up**: 1000 iterations (or 10% of total) to ensure JIT compilation
-2. **Measured**: 5 runs of full iteration count
-3. **Aggregated**: Median of 5 runs reported
+Each framework is timed in **its own interpreter**, several times over:
 
-This reduces variance from:
-- Python JIT warmup
-- CPU frequency scaling
-- Garbage collection
+1. **Rounds**: `ROUNDS` rounds; in each one every framework gets one fresh
+   process, and the order is reversed every other round
+2. **Turns**: the processes of a round are all alive at once and exactly one
+   is running. They take turns, one timed sample each, so an operation is
+   measured in every framework within a fraction of a second
+3. **Samples**: each operation is warmed up (1000 calls, or 10% of the
+   count) and then timed `REPEATS` times at its full iteration count, with
+   the garbage collector off while a sample is timed
+4. **Aggregated**: the **fastest** sample of an operation across all rounds
+   is the number reported
+
+Why it is built this way, each point learned from a number that was wrong:
+
+- **One process per framework**: timed one after another in a single
+  interpreter, a framework inherits the heap and allocator state the previous
+  one left behind
+- **Turns, sample by sample**: a machine's speed changes from moment to
+  moment. Time one framework and then the next, and that change is reported
+  as a difference between them; taking turns puts the samples that get
+  compared next to each other in time
+- **Minimum, not median**: interference can only make a sample slower. The
+  median of five samples in one process moved 14-25% between two runs of
+  identical code
+
+### Regression Gate
+
+`check_ratios.py` gates mirror_bridge against **itself**. The suite builds the
+benchmark module a second time from the commit named in `gate_baseline.json`
+and times it in the same run as HEAD; an operation that is slower at HEAD by
+more than the tolerance fails the gate. Competitor ratios are printed, never
+gated: they also move when the CPU changes or a competitor ships a release.
+
+```bash
+# After ./benchmarks/run_all_benchmarks.sh:
+python3 benchmarks/check_ratios.py benchmarks/runtime/python/runtime_results.json
+
+# Compare against another checkout instead of the committed baseline:
+MB_GATE_BASELINE_ROOT=/path/to/other/worktree ./benchmarks/run_all_benchmarks.sh
+```
+
+CI passes `--require-baseline`, which also fails the gate when the baseline
+could not be fetched, built or measured. Move the commit in
+`gate_baseline.json` deliberately: after an improvement lands, or to the
+commit that accepts a slowdown. Never to make a red build green.
 
 ### Statistical Rigor
 
-- **Median** is used instead of mean to reduce impact of outliers
-- **Multiple runs** ensure reproducibility
+- **Minimum** over many samples, because noise on a timing is one-sided
+- **Separate processes taking turns** keep one framework's state and the
+  machine's drift out of another framework's number
 - **High iteration counts** reduce per-call measurement overhead
 - **Warmup phase** ensures steady-state performance
 
@@ -306,7 +344,7 @@ The key value proposition is:
 
 ## Output Files
 
-- `runtime_results.json`: Detailed runtime benchmark data (nanoseconds per operation)
+- `runtime/python/runtime_results.json`: Detailed runtime benchmark data (nanoseconds per operation), including the gate's `mirror_bridge_baseline` numbers and every round's reading under `_meta`
 - Console output: Human-readable summary with speedup ratios
 
 ## Customizing Benchmarks
@@ -316,7 +354,7 @@ To add new test cases:
 1. **Compile-time**: Add new directory under `compile_time/` with C++ header + 3 binding files
 2. **Runtime**: Add new method to `benchmark_class.hpp` and update `run_runtime_benchmarks.py`
 
-To change iteration counts, edit `ITERATIONS` dictionary in `run_runtime_benchmarks.py`.
+To change iteration counts, edit `ITERATIONS` dictionary in `run_runtime_benchmarks.py`. The gate's tolerance was calibrated at the committed `ITERATIONS`, `REPEATS` and `ROUNDS`; re-run the A/A check described in `check_ratios.py` if you lower them.
 
 ## Known Limitations
 

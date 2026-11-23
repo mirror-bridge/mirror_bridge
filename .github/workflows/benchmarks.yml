@@ -27,28 +27,36 @@ jobs:
       - name: Mark workspace safe for git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      # Besides the table, the suite builds the benchmark module a second
+      # time from the commit named in benchmarks/gate_baseline.json and times
+      # it alongside HEAD. The checkout above is one commit deep, so the suite
+      # fetches that commit by SHA; it needs the credentials actions/checkout
+      # leaves in the repository's config, and the safe.directory entry above.
       - name: Run benchmark suite
         run: ./benchmarks/run_all_benchmarks.sh
 
-      # Ratios are the stable signal across machines, so the comparison is
-      # against committed floors rather than absolute ns/op. Where a competitor
-      # is faster the output says so without failing: that is a fact to see,
-      # not a regression.
+      # mirror_bridge is gated against itself: HEAD and the baseline commit,
+      # measured in the same job on the same machine. A ratio against a
+      # competitor cannot do this job, because it also moves when the runner's
+      # CPU changes and when the competitor ships a release. While such a
+      # ratio was the gate it failed every run, and never because
+      # mirror_bridge had changed. Where a competitor is faster the output
+      # says so without failing: that is a fact to see, not a regression.
       #
-      # This step records its result rather than acting on it. It has to run
-      # before the PR step, because it is what writes ratio_floors.json and
-      # `git add` stages nothing at all -- not even the paths that do exist --
-      # if one of its pathspecs matches no file. A glob is no more lenient. The
-      # failing is done by a later step. This relies on the benchmark suite
-      # above having produced mirror_bridge numbers, which it must have for the
-      # job to have got this far, since check_ratios.py refuses without them.
-      - name: Gate the runtime ratios against the committed floors
+      # --require-baseline makes "the baseline could not be fetched, built or
+      # measured" a failure rather than a gate that passed by comparing
+      # nothing.
+      #
+      # This step records its result rather than acting on it, so that the
+      # refresh below is published whatever the verdict. The failing is done
+      # by a later step.
+      - name: Gate mirror_bridge against its baseline commit
         id: gate
         run: |
           set +e
           python3 benchmarks/check_ratios.py \
             benchmarks/runtime/python/runtime_results.json \
-            --require-floors
+            --require-baseline
           echo "rc=$?" >> "$GITHUB_OUTPUT"
 
       - name: Splice regenerated runtime table into the benchmarks page
@@ -71,7 +79,7 @@ jobs:
       # step runs before the PR: one missing competitor threw away a runtime
       # table that had already regenerated cleanly. The whole monthly refresh
       # died that way, which is why the published page kept seven of the
-      # twelve measured operations and ratio_floors.json never landed.
+      # twelve measured operations for weeks.
       #
       # So record the refusal and leave the committed trading fragment where
       # it is. It carries its own provenance line, so a page with a fresh
@@ -106,29 +114,29 @@ jobs:
         with:
           add-paths: |
             docs/internals/benchmarks.md
-            benchmarks/ratio_floors.json
           commit-message: "Regenerate runtime benchmarks page"
           title: "Regenerate runtime benchmarks page"
           body: |
             Automated benchmark refresh: the runtime suite was rerun on a
             GitHub Actions runner and the table in
             `docs/internals/benchmarks.md` regenerated from the results.
-            Compare the ratio columns against the previous page; absolute
-            times shift with runner hardware, ratios should be stable.
+            Absolute times shift with runner hardware. The ratio columns
+            shift with it too, less, and whenever a competitor pin in
+            `Dockerfile.benchmark` is bumped: they are what was measured
+            this month, not a regression signal.
 
-            If `benchmarks/ratio_floors.json` is in this PR, it is the
-            baseline the regression gate compares against and the gate is
-            unarmed until this merges. The run that produced this PR failed
-            for exactly that reason.
+            Whether mirror_bridge itself got slower is a separate check in
+            the run that produced this PR, which times HEAD against the
+            commit in `benchmarks/gate_baseline.json` on the same machine.
+            This PR is opened whether or not that check passed, so look at
+            the run before merging.
           branch: bot/benchmarks-refresh
           delete-branch: true
 
-      # The two checks that can fail run last, after the PR exists. Neither one
+      # The checks that can fail run last, after the PR exists. None of them
       # may stop the refresh from being published: a month's numbers are worth
-      # more than the promptness of a red build, and on the run that first
-      # establishes the ratio floors the gate fails by design -- the PR above is
-      # what carries them into the repository, so failing before it would mean
-      # the gate could never become armed.
+      # more than the promptness of a red build, and a table that shows a
+      # regression is more use than no table.
       - name: Fail if a measured operation never reached the page
         run: |
           python3 benchmarks/format_results.py \
@@ -143,9 +151,9 @@ jobs:
             exit 1
           fi
 
-      - name: Fail if a ratio regressed, or if nothing was gated
+      - name: Fail if mirror_bridge regressed against its baseline, or was not compared
         run: |
           if [ "${{ steps.gate.outputs.rc }}" != "0" ]; then
-            echo "See the 'Gate the runtime ratios' step above for which."
+            echo "See the 'Gate mirror_bridge against its baseline commit' step above for which."
             exit 1
           fi

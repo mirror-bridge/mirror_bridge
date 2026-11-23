@@ -4,8 +4,12 @@
 Usage: format_results.py <runtime_results.json> [--commit SHA] [--env DESC]
 
 Emits markdown on stdout. Ratios against pybind11 are the headline numbers:
-absolute ns/op varies with the machine, but same-machine same-flags ratios
-are stable, which is what makes a CI-regenerated page honest.
+absolute ns/op varies with the machine, and a same-machine same-flags ratio
+varies much less. Less is not zero, though: the ratio to pybind11 moved 22%
+between two refreshes with no change on mirror_bridge's side (a different
+runner CPU, and competitors that were not yet pinned), so the page presents
+the ratios as this run's measurement and nothing gates on them. See
+check_ratios.py for what is gated instead.
 """
 
 import argparse
@@ -33,6 +37,9 @@ OPERATIONS = [
     ("construction", "Object construction"),
 ]
 
+# Not every key in the results file: the runner also records
+# `mirror_bridge_baseline`, the same library at an older commit, which is the
+# regression gate's business and would be a column of near-1.00x here.
 FRAMEWORKS = ["mirror_bridge", "pybind11", "nanobind", "swig", "boost_python"]
 
 
@@ -82,8 +89,10 @@ def main():
         "All frameworks bind the **same C++ class** "
         "([`benchmark_class.hpp`](../../benchmarks/runtime/shared/benchmark_class.hpp)) "
         "with the same compiler and `-O3`; only the binding layer differs. "
-        "Absolute times vary by machine - the **ratio columns** are the "
-        "stable signal. Reproduce with `./run_benchmarks.sh` from the repo root."
+        "Absolute times vary by machine; the **ratio columns** vary far less, "
+        "but they do move with the CPU and with the competitor versions, so "
+        "read them as this run's measurement. Reproduce with "
+        "`./run_benchmarks.sh` from the repo root."
     )
     out.append("")
 
@@ -108,11 +117,24 @@ def main():
             row.append(f"{data[fw][key] / mb:.2f}x" if mb > 0 else "-")
         out.append("| " + " | ".join(row) + " |")
 
+    # A results file from before the protocol was recorded was taken the old
+    # way, and the committed page has to keep rendering from one until the
+    # next refresh lands.
+    protocol = (data.get("_meta") or {}).get("protocol") or {}
+    if protocol.get("rounds"):
+        methodology = (
+            "each framework is timed in its own interpreter, %d times over, "
+            "the frameworks taking turns one sample at a time, and the number "
+            "shown is the fastest of all its samples (warmup pass first, "
+            "garbage collector off while timing)" % protocol["rounds"]
+        )
+    else:
+        methodology = "median of 5 runs, warmup pass first"
     out.append("")
     out.append(
         "Ratios > 1.00x mean mirror_bridge is faster for that operation; "
-        "< 1.00x means the other framework is. Methodology: median of 5 runs, "
-        "warmup pass first, iteration counts per operation in "
+        "< 1.00x means the other framework is. Methodology: " + methodology +
+        ", iteration counts per operation in "
         "[`run_runtime_benchmarks.py`](../../benchmarks/runtime/python/run_runtime_benchmarks.py)."
     )
     out.append("")

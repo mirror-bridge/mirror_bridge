@@ -170,8 +170,65 @@ project size; regenerating after a header change is one CLI invocation.
 
 - Every framework binds the same C++ class (`benchmarks/runtime/shared/benchmark_class.hpp`)
 - Same compiler for all frameworks, `-O3 -DNDEBUG`; only the binding layer differs
-- 5 runs per measurement, median reported, warmup pass first
-- Compare ratios, not absolute times: ratios are stable across machines
+- Competitor versions are pinned in `Dockerfile.benchmark`, so a column moves
+  when a pin is bumped rather than whenever the image is rebuilt
+- Each framework is timed in its own interpreter, twenty times over. Within
+  a round the processes take turns one sample at a time, so that an operation
+  is measured in every framework within a fraction of a second, and the order
+  is reversed every other round. The number published for an operation is the
+  fastest of all its samples, taken after a warmup pass with the garbage
+  collector off
+- Compare ratios, not absolute times, but do not read a ratio as a constant:
+  the ratio to pybind11 fell about 22% between two refreshes in which
+  mirror_bridge's Python backend did not change, while the ratio to nanobind
+  barely moved. The runner's CPU had changed and the competitors were not yet
+  pinned
+
+Each of those choices replaced one that produced a wrong number. Timing every
+framework in one interpreter, one after another, let each inherit the heap the
+previous one left. Timing one framework and then the next made the machine's
+changes of pace look like differences between frameworks. And the median of
+five samples from a single process moved 14-25% between two runs of identical
+code, because everything that can go wrong with a timing makes it slower and a
+median keeps half of it.
+
+The runtime table states how it was taken in its own footer; one dated before
+this protocol was a single pass, median of five.
+
+## Regression gate
+
+The monthly run is also a check, and what it checks is mirror_bridge against
+**itself**. `benchmarks/gate_baseline.json` names a commit of this repository.
+The suite builds the benchmark module a second time from that commit's own
+sources, times it in the same job as HEAD under the protocol above, and
+`benchmarks/check_ratios.py` fails the run if any operation is more than
+8% slower at HEAD.
+
+It used to compare against competitors, with a committed floor under each
+ratio, and it failed on every run it was armed for without mirror_bridge
+changing. A ratio to a competitor answers three questions at once: did we get
+slower, did they get faster, and is this a different machine. Only the first is
+a regression, and the gate could not tell them apart. Two builds of the same
+library in one job on one machine differ in exactly one thing.
+
+- **The tolerance is measured.** With HEAD as its own baseline, the largest
+  deviation on any operation was 2.6% over three runs in a shared dev
+  container; the tolerance is three times that, with the room left for a
+  runner that is noisier than the container and for the alignment luck of
+  two different binaries. The numbers are next to the constant in
+  `check_ratios.py`. The price is that a slowdown under 8% passes: one of 5%,
+  injected on purpose, was measured as such and did not fail.
+- **A gate that compared nothing does not pass.** If the baseline commit
+  cannot be fetched, no longer compiles, or cannot run the current operations,
+  the suite still publishes the table, the results file records why, and
+  `--require-baseline` (which CI passes) fails the run with that reason.
+- **Competitors are reported, never gated.** Where one is faster the output
+  lists the operation and by how much.
+- **Moving the baseline is a decision.** Forward after an improvement lands,
+  so that the improvement is what gets defended; to the commit that accepts a
+  slowdown, when one is accepted; or when the benchmarked operations change.
+  Because the baseline stays put otherwise, a slow drift of small regressions
+  accumulates against it instead of resetting every month.
 
 ## Reproducing
 
