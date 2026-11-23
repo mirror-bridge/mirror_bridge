@@ -1,11 +1,25 @@
 name: Build and Publish Docker Images
 
+# The three images are built from their Dockerfiles and nothing else: none of
+# them copies anything out of the repository. Building them on every push was
+# six jobs of one to two and a half hours each, for images identical to the
+# last ones, and four merges in a morning queued the test jobs behind them for
+# an hour. A release tag still builds (path filters are not applied to tag
+# pushes), and workflow_dispatch builds on demand.
 on:
   push:
     branches: [ main ]
     tags: [ 'v*' ]
+    paths:
+      - 'Dockerfile'
+      - 'Dockerfile.*'
+      - '.github/workflows/docker-publish.yml'
   pull_request:
     branches: [ main ]
+    paths:
+      - 'Dockerfile'
+      - 'Dockerfile.*'
+      - '.github/workflows/docker-publish.yml'
   workflow_dispatch:
 
 env:
