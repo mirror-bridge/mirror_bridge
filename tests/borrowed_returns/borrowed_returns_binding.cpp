@@ -17,6 +17,7 @@ MIRROR_BRIDGE_MODULE(borrowed_returns,
     mirror_bridge::bind_class<borrowed::Node>(m, "Node");
     mirror_bridge::bind_class<borrowed::Tree>(m, "Tree");
     mirror_bridge::bind_class<borrowed::Item>(m, "Item");
+    mirror_bridge::bind_class<borrowed::Crate>(m, "Crate");
     mirror_bridge::bind_class<borrowed::Counted>(m, "Counted");
     mirror_bridge::bind_class<borrowed::Sealed>(m, "Sealed");
     mirror_bridge::bind_class<borrowed::Registry>(m, "Registry");

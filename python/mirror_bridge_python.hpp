@@ -2016,6 +2016,24 @@ PyObject* to_python_result(R& result) {
 #endif
 }
 
+// Does `address` lie inside the object `object` points at?
+//
+// Asked of a pointer a method has just returned and of each object it was
+// handed, to find out whose storage the result is. Compared as integers: `<`
+// on pointers into different objects is unspecified, and different objects
+// is the common case here.
+template<typename Object>
+inline bool points_into(const void* address, const Object* object) {
+    if (!address || !object) return false;
+    const auto at = reinterpret_cast<std::uintptr_t>(address);
+    const auto begin = reinterpret_cast<std::uintptr_t>(object);
+    if constexpr (requires { sizeof(Object); }) {
+        return at >= begin && at - begin < sizeof(Object);
+    } else {
+        return at == begin;
+    }
+}
+
 // The same, for the result of an instance method called on `receiver`. A
 // separate function and not a defaulted parameter on the one above: every
 // other caller of to_python_result has no receiver, and a borrow reached
@@ -3205,6 +3223,15 @@ struct py_param_storage {
 
 template<typename ParamType>
 using py_param_storage_t = typename py_param_storage<ParamType>::type;
+
+// Is this parameter's stored argument the address of an object a Python
+// wrapper holds, as opposed to a value built from Python data? A `const
+// char*` is pointer-typed storage too, and is a value.
+template<typename ParamType>
+consteval bool holds_wrapped_object() {
+    return std::is_pointer_v<py_param_storage_t<ParamType>> &&
+           !std::is_pointer_v<std::remove_cvref_t<ParamType>>;
+}
 
 // A non-const lvalue reference parameter is a promise: the callee writes
 // through it and the caller sees the result. The promise is kept only when
@@ -5006,7 +5033,28 @@ PyObject* invoke_with_n_args(PyWrapper<T>* wrapper, PyObject* const* resolved) {
                         forward_arg<method_param_t<T, FuncIndex, Is>>(std::get<Is>(cpp_args))...
                     );
                 });
-                return method_result_to_python(result, reinterpret_cast<PyObject*>(wrapper));
+                // A borrow is kept valid by the Python object that owns what
+                // it points at, and that is the receiver unless the method
+                // returned a pointer to something it was GIVEN:
+                //
+                //   Node* Tree::attach(Node& child) { ...; return &child; }
+                //
+                // The result there is the caller's own object, or a part of
+                // it. Pinning the receiver would leave the wrapper dangling
+                // the moment the argument's Python object is collected, so
+                // the argument is the lender, and borrow_into_python hands
+                // back that very object when the pointer is to all of it.
+                PyObject* lender = reinterpret_cast<PyObject*>(wrapper);
+                if constexpr (returns_borrowable_pointer<ReturnType>()) {
+                    ([&] {
+                        if constexpr (holds_wrapped_object<method_param_t<T, FuncIndex, Is>>()) {
+                            if (points_into(result, std::get<Is>(cpp_args))) {
+                                lender = resolved[Is];
+                            }
+                        }
+                    }(), ...);
+                }
+                return method_result_to_python(result, lender);
             }
         } catch (const std::exception& e) {
             set_py_error_from_cpp_exception(e);

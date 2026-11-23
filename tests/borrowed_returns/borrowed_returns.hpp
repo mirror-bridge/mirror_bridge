@@ -116,6 +116,11 @@ struct Item {
     Item* self() { return this; }
 };
 
+struct Crate {
+    Item first;
+    Item second;
+};
+
 // A struct mirror_bridge would refuse to bind: its members are raw pointers.
 struct RawNode {
     int depth = 0;
@@ -191,6 +196,11 @@ public:
     Registry& operator=(const Registry&) = delete;
 
     void add(int id, double weight) { items_.push_back(std::make_unique<Item>(id, weight)); }
+
+    // Neither of these returns anything the registry owns: the result is the
+    // caller's argument, or a part of it.
+    Item* same(Item& item) { return &item; }
+    Item* second_of(Crate& crate) { return &crate.second; }
 
     // Mutable pointer: the caller is looking at the registry's own Item.
     Item* get(int id) {

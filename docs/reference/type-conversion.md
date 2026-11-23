@@ -332,6 +332,11 @@ returns the receiver or its owner (`node.GetDocument()`, a setter that returns
 calls. Any other object gets a new wrapper each time, so compare borrows by
 what they hold and not with `is`.
 
+A method that returns a pointer to one of its own *arguments*, or to a part
+of one (`Node* attach(Node& child)` returning `&child`), is not returning
+anything the receiver owns. The borrow then holds the argument, and when the
+pointer is to the whole argument you get that same Python object back.
+
 **A class nobody outside may destroy** — a private, protected or deleted
 destructor, which is how tinyxml2 and box2d say "the library frees these" —
 binds as a class that is only ever borrowed. Its methods work. Constructing
@@ -347,8 +352,9 @@ list the `const` half as declined.
 
 **What a borrow assumes, and no signature can tell it:**
 
-- *The object belongs to the receiver.* `Node* Node::clone_into(Doc& target)`
-  returns something `target` owns. The borrow keeps the receiver's owner
+- *The object belongs to the receiver, or is an argument.*
+  `Node* Node::clone_into(Doc& target)` returns a new object that `target`
+  owns and that lives outside it. The borrow keeps the receiver's owner
   alive, which is the wrong one, and dangles when `target` goes.
 - *The pointer is to one object.* A method returning a pointer to the first
   element of an array gives you that element only.

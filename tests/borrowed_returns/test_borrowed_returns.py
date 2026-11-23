@@ -269,4 +269,34 @@ for make in (b.Listener, Loud):
 assert b.Tally.alive() == 0, "a refused construction still built a Listener"
 print("  ✓ Listener() and a Python subclass of it are both refused")
 
+print("Test 19: a pointer to the ARGUMENT is kept valid by the argument...")
+# `Item* same(Item& item) { return &item; }` returns the caller's own object.
+# Pinning the registry would leave the result dangling as soon as the
+# argument's Python object went away, which for a temporary is at once.
+settle()
+reg = b.Registry()
+item = b.Item()
+assert reg.same(item) is item, "the caller's own object came back as a second wrapper"
+del item
+
+settle()
+result = reg.same(b.Item())
+gc.collect()
+assert b.Tally.freed() == 0, "the argument was destroyed while a wrapper still points at it"
+del result
+gc.collect()
+assert b.Tally.freed() == 1, "the argument was never released"
+
+# A part of the argument: the borrow has to hold the whole Crate.
+settle()
+second = reg.second_of(b.Crate())
+gc.collect()
+assert b.Tally.freed() == 0, "the Crate was destroyed under a borrow of its member"
+second.id = 5
+assert second.id == 5
+del second
+gc.collect()
+assert b.Tally.freed() == 2, "the Crate and its two Items were never released"
+print("  ✓ the argument is returned as itself, and outlives a borrow of its member")
+
 print("\nAll borrowed-return tests passed.")
