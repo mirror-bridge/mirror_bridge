@@ -920,6 +920,7 @@ cannot cross is something you hear about from `generate` rather than from an
 
 | Shape | Status | What to write instead |
 |-------|--------|-----------------------|
+| A data member whose type has no conversion: a raw pointer, `void*`, a function pointer, a container of raw pointers | Left out, in every backend. The class binds with its other members and all its methods, and `generate` names the member | Nothing. A hand-written `bind_class<T>` refuses such a class unless the member is marked `[[=exclude{}]]`; `bind_class_when_bindable<T>` is what `generate` emits and leaves it out. See [errors](errors.md#unconvertible-member-type-bind_class--mirror_bridge_validate) |
 | `T*` as a parameter of a method, `T` a bound class | Python: bound, takes the wrapper's own object. Lua, JavaScript: not bound | Nothing. See [Pointer parameters](#pointer-parameters-python) for `None`, arrays and what it assumes |
 | `T*` as a parameter of a constructor or a free function | Not bound | Take `T&`, which aliases the Python object |
 | `T*` returned by an instance method, `T` a bound class | Python: bound, a borrow that keeps the owner alive. Lua, JavaScript: not bound | Nothing. See [Pointer returns](#pointer-returns-python) for what it assumes about lifetime |
