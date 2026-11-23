@@ -89,6 +89,15 @@ assert(type(tags) == "table" and #tags == 2 and tags[1] == 7 and tags[2] == 9,
 assert(not pcall(function() scene.tags = {1, 2} end), "the converter refuses writes")
 print("  Scene.tags crossed as {7, 9}")
 
+-- Methods over a pointer type the binding converts itself
+print("\nTest: a handle type with a converter of its own...")
+local pool = pixel.Pool()
+assert(pool.open ~= nil and pool.close ~= nil,
+    "methods over a custom-converted pointer type must be bound")
+local handle = pool:open()
+assert(type(handle) == "userdata" and pool:close(handle) == true and pool.opened == 1)
+print("  Pool:open() and Pool:close() work through the binding's converter")
+
 print("\n" .. string.rep("=", 40))
 print("All custom type converter tests passed!")
 print(string.rep("=", 40))

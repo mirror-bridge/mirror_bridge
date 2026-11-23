@@ -320,6 +320,35 @@ All supported types can be returned from methods:
 | Nested objects | Dict/Object/Table |
 | Smart pointers | Converted value or null |
 
+### A method that cannot be called is left out (Lua, JavaScript)
+
+Lua and JavaScript call a method by converting each argument into a local of
+the parameter's type, moving those into the call, and converting what comes
+back. A method is bound when all three steps are possible and left out when
+one is not:
+
+| Left out when | For example |
+|---------------|-------------|
+| a parameter has no conversion, or no local of its type can be built | `adopt(Item*)`, `release(void*)`, `each(void (*)(int))`, a class with no default constructor taken by value |
+| a parameter is a non-`const` reference | `fill(Item& out)`: the write would land in the local and be lost |
+| the return type has no conversion | `Item* find(int)`, `std::vector<Item*> all()` |
+
+A pointer type is asked of the backend's own overloads, so `char*` is a string here (as it always was in these two backends) and a handle type with `to_lua`/`from_lua` or `to_javascript`/`from_javascript` overloads of your own keeps its methods.
+
+The class binds with every other method, and so does the rest of the module.
+Each of these was a compile error for the whole module before, so one pointer
+return anywhere meant no bindings at all. Where a name is overloaded, an
+overload that cannot be called no longer stands in front of one that can.
+
+Set `MIRROR_BRIDGE_REPORT_DECLINED=1` when the module loads to have each
+method that was left out named on stderr with the step it failed at, in the
+same line shape the Python backend uses:
+
+```
+mirror_bridge: skipped method 'Shelf::find' (the return type has no conversion to Lua)
+mirror_bridge: skipped method 'Shelf::fill' (a parameter has no conversion from Lua)
+```
+
 ### Pointer returns (Python)
 
 A factory-style C++ API hands out the objects it owns as raw pointers:

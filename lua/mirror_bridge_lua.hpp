@@ -1302,6 +1302,39 @@ int lua_method(lua_State* L);
 
 // No optimized property accessors - keep using reflection-based __index/__newindex
 
+// What this backend can read and write, for core's method gate. A method
+// whose parameters and return do not pass it is left out by name, where it
+// used to be a compile error for every class in the module.
+struct LuaConversions {
+    static constexpr const char* language = "Lua";
+
+    template<typename Value>
+    static consteval bool reads() {
+        return requires(lua_State* L, Value& value) { from_lua(L, 1, value); };
+    }
+
+    // std::expected has no to_lua: a method returning one is turned into
+    // Lua's value-or-nil-and-message by the call itself.
+    template<typename Value>
+    static consteval bool writes() {
+        if constexpr (is_lua_std_expected<Value>::value) {
+            return true;
+        } else {
+            return requires(lua_State* L, const Value& value) { to_lua(L, value); };
+        }
+    }
+};
+
+template<typename T, std::size_t FuncIndex>
+consteval bool lua_method_bindable() {
+    return core::method_call_bindable<LuaConversions, T, FuncIndex>();
+}
+
+template<typename T, std::size_t FuncIndex>
+consteval bool lua_static_method_bindable() {
+    return core::static_method_call_bindable<LuaConversions, T, FuncIndex>();
+}
+
 template<typename T>
 int lua_index(lua_State* L) {
     // L[1] = userdata (wrapper), L[2] = key (field name).
@@ -1346,11 +1379,16 @@ int lua_index(lua_State* L) {
                 constexpr auto method_name_sv = std::meta::identifier_of(get_member_function<T, Is>());
                 constexpr auto method_name = method_name_sv.data();
 
-                if (std::strcmp(key, method_name) == 0) {
-                    // Push a closure that captures the method index
-                    lua_pushinteger(L, Is);
-                    lua_pushcclosure(L, lua_method<T, Is>, 1);
-                    found = true;
+                // A method this backend cannot call is not offered: the
+                // name falls through to the next overload that can be, or
+                // to nil.
+                if constexpr (lua_method_bindable<T, Is>()) {
+                    if (std::strcmp(key, method_name) == 0) {
+                        // Push a closure that captures the method index
+                        lua_pushinteger(L, Is);
+                        lua_pushcclosure(L, lua_method<T, Is>, 1);
+                        found = true;
+                    }
                 }
             }(), ...);
         }(std::make_index_sequence<method_count>{});
@@ -1984,6 +2022,8 @@ void bind_class_when_bindable(lua_State* L, const char* name) {
 
 template<Bindable T>
 void bind_class_impl(lua_State* L, const char* name) {
+    core::report_declined_calls<LuaConversions, T>(name);
+
     static_assert(core::type_key_is_distinctive<T>(),
         "bind_class<T>: this compiler cannot spell T distinctly, so T would share a "
         "metatable with another specialisation and the boundary check could not tell "
@@ -2054,9 +2094,11 @@ void bind_class_impl(lua_State* L, const char* name) {
     if constexpr (static_method_count > 0) {
         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
             ([&] {
-                constexpr auto method_name = get_static_member_function_name<T, Is>();
-                lua_pushcclosure(L, lua_static_method<T, Is>, 0);
-                lua_setfield(L, -2, method_name);
+                if constexpr (lua_static_method_bindable<T, Is>()) {
+                    constexpr auto method_name = get_static_member_function_name<T, Is>();
+                    lua_pushcclosure(L, lua_static_method<T, Is>, 0);
+                    lua_setfield(L, -2, method_name);
+                }
             }(), ...);
         }(std::make_index_sequence<static_method_count>{});
     }

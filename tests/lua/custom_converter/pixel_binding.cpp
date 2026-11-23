@@ -95,6 +95,17 @@ inline bool from_lua(lua_State*, int, Bag<Tag*>&) {
     return false;
 }
 
+// Handle <-> light userdata.
+inline void to_lua(lua_State* L, const Handle& handle) {
+    lua_pushlightuserdata(L, handle);
+}
+
+inline bool from_lua(lua_State* L, int idx, Handle& handle) {
+    if (!lua_islightuserdata(L, idx)) return false;
+    handle = static_cast<Handle>(lua_touserdata(L, idx));
+    return true;
+}
+
 } // namespace mirror_bridge::lua
 
 // Now include mirror_bridge_lua - it will find our custom converters
@@ -108,4 +119,5 @@ inline constexpr bool mirror_bridge::core::has_custom_conversion<Bag<Tag*>> = tr
 MIRROR_BRIDGE_LUA_MODULE(pixel,
     mirror_bridge::lua::bind_class<Pixel>(L, "Pixel");
     mirror_bridge::lua::bind_class<Scene>(L, "Scene");
+    mirror_bridge::lua::bind_class<Pool>(L, "Pool");
 )

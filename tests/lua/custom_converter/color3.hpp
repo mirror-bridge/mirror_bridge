@@ -68,3 +68,15 @@ struct Scene {
     Bag<Tag*> tags{{&first, &second}};
     int count = 2;
 };
+
+// An opaque handle, the shape every C API hands out. A raw pointer has no
+// conversion, so open() and close() are left out of the class unless the
+// binding supplies one, and then they must be bound.
+struct Opaque;
+typedef Opaque* Handle;
+
+struct Pool {
+    int opened = 0;
+    Handle open() { ++opened; return reinterpret_cast<Handle>(this); }
+    bool close(Handle handle) { return handle == reinterpret_cast<Handle>(this); }
+};

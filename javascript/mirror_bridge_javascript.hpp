@@ -1526,6 +1526,35 @@ napi_value js_setter(napi_env env, napi_callback_info info) {
 // Method Binding
 // ============================================================================
 
+// What this backend can read and write, for core's method gate. A method
+// whose parameters and return do not pass it is left out by name, where it
+// used to be a compile error for every class in the module.
+struct JsConversions {
+    static constexpr const char* language = "JavaScript";
+
+    template<typename Value>
+    static consteval bool reads() {
+        return requires(napi_env env, napi_value js, Value& value) {
+            from_javascript(env, js, value);
+        };
+    }
+
+    template<typename Value>
+    static consteval bool writes() {
+        return requires(napi_env env, const Value& value) { to_javascript(env, value); };
+    }
+};
+
+template<typename T, std::size_t FuncIndex>
+consteval bool js_method_bindable() {
+    return core::method_call_bindable<JsConversions, T, FuncIndex>();
+}
+
+template<typename T, std::size_t FuncIndex>
+consteval bool js_static_method_bindable() {
+    return core::static_method_call_bindable<JsConversions, T, FuncIndex>();
+}
+
 template<typename T, std::size_t FuncIndex, std::size_t... Is>
 napi_value call_method_impl(napi_env env, T* self, napi_value* args, std::index_sequence<Is...>) {
     constexpr auto member_func = get_member_function<T, FuncIndex>();
@@ -1980,6 +2009,8 @@ napi_value bind_class_when_bindable(napi_env env, napi_value exports, const char
 
 template<Bindable T>
 napi_value bind_class_impl(napi_env env, napi_value exports, const char* name) {
+    core::report_declined_calls<JsConversions, T>(name);
+
     static_assert(core::type_key_is_distinctive<T>(),
         "bind_class<T>: this compiler cannot spell T distinctly, so T would compare "
         "equal to another specialisation and the boundary check could not tell them "
@@ -2040,15 +2071,21 @@ napi_value bind_class_impl(napi_env env, napi_value exports, const char* name) {
     // Add instance methods
     [&]<std::size_t... Is>(std::index_sequence<Is...>) {
         ([&] {
-            constexpr auto method_name_sv = std::meta::identifier_of(get_member_function<T, Is>());
-            constexpr auto method_name = method_name_sv.data();
+            // A method this backend cannot call is not put on the prototype.
+            // Where a name is overloaded the last one set is the one a caller
+            // reaches, so this also keeps an overload that cannot be called
+            // from replacing one that can.
+            if constexpr (js_method_bindable<T, Is>()) {
+                constexpr auto method_name_sv = std::meta::identifier_of(get_member_function<T, Is>());
+                constexpr auto method_name = method_name_sv.data();
 
-            napi_value fn;
-            napi_create_function(env, method_name, NAPI_AUTO_LENGTH, js_method<T, Is>, nullptr, &fn);
+                napi_value fn;
+                napi_create_function(env, method_name, NAPI_AUTO_LENGTH, js_method<T, Is>, nullptr, &fn);
 
-            napi_value prototype;
-            napi_get_named_property(env, constructor, "prototype", &prototype);
-            napi_set_named_property(env, prototype, method_name, fn);
+                napi_value prototype;
+                napi_get_named_property(env, constructor, "prototype", &prototype);
+                napi_set_named_property(env, prototype, method_name, fn);
+            }
         }(), ...);
     }(std::make_index_sequence<method_count>{});
 
@@ -2056,13 +2093,15 @@ napi_value bind_class_impl(napi_env env, napi_value exports, const char* name) {
     if constexpr (static_method_count > 0) {
         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
             ([&] {
-                constexpr auto method_name = get_static_member_function_name<T, Is>();
+                if constexpr (js_static_method_bindable<T, Is>()) {
+                    constexpr auto method_name = get_static_member_function_name<T, Is>();
 
-                napi_value fn;
-                napi_create_function(env, method_name, NAPI_AUTO_LENGTH, js_static_method<T, Is>, nullptr, &fn);
+                    napi_value fn;
+                    napi_create_function(env, method_name, NAPI_AUTO_LENGTH, js_static_method<T, Is>, nullptr, &fn);
 
-                // Add to constructor (not prototype) for static methods
-                napi_set_named_property(env, constructor, method_name, fn);
+                    // Add to constructor (not prototype) for static methods
+                    napi_set_named_property(env, constructor, method_name, fn);
+                }
             }(), ...);
         }(std::make_index_sequence<static_method_count>{});
     }
