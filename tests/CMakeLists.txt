@@ -305,6 +305,14 @@ if(MIRROR_BRIDGE_BUILD_PYTHON)
         )
     endif()
 
+    # A pointer parameter takes the object a wrapper already holds
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pointer_params)
+        mirror_bridge_python_module(pointer_params
+            pointer_params/pointer_params_binding.cpp
+            INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/pointer_params
+        )
+    endif()
+
     # A std::vector data member is a live view of the C++ vector, not a copy
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/sequence_views)
         mirror_bridge_python_module(sequence_views

@@ -378,13 +378,88 @@ list the `const` half as declined.
   caller should `delete` is bound as a borrow, and the object leaks. Return a
   `std::unique_ptr` instead.
 
-Not covered yet: a pointer *parameter* (`world.DestroyBody(body)`,
-`node.InsertEndChild(child)`), any `const T*` return, and returning the
-most-derived type for a pointer to a polymorphic base (an `XMLNode*` that is
-really an `XMLElement` arrives as an `XMLNode`; the library's own
-`ToElement()` narrows it). Lua and JavaScript still refuse pointer returns; C#
-borrows them under its own rules, described in
+Not covered yet: any `const T*` return, and returning the most-derived type
+for a pointer to a polymorphic base (an `XMLNode*` that is really an
+`XMLElement` arrives as an `XMLNode`; the library's own `ToElement()` narrows
+it). Lua and JavaScript still refuse pointer returns; C# borrows them under
+its own rules, described in
 [the C# design notes](../internals/csharp-design.md#a-class-c-cannot-own-binds-borrow-only).
+
+### Pointer parameters (Python)
+
+`world.DestroyBody(body)`, `node.InsertEndChild(child)`,
+`world.CreateBody(definition)`: a method that takes a pointer to a class takes
+the object a wrapper already holds. It is passed by address, exactly as a
+`T&` parameter is, so nothing is copied, a write through a `T*` reaches the
+Python object, and a derived object is adjusted to the base the callee asked
+for.
+
+| Parameter | Of | Takes |
+|-----------|----|-------|
+| `T*` or `const T*`, `T` a class that can be bound | an instance or static method | An object of `T` or of a class derived from it. `None` only if the parameter has a default argument |
+| the same, declared beside an integer named like a count (`points, count`; `numVertices, vertices`) or beside an unnamed integer | an instance or static method | Not bound. That is an array, and a wrapper holds one object |
+| `T*` or `const T*` | a constructor, a free function or an operator | Not bound |
+| `T*&`, `T**`, `int*`, a pointer to a standard-library class or to a forward-declared class | anywhere | Not bound |
+
+```cpp
+class World {
+public:
+    Body* CreateBody(const BodyDef* def);
+    void DestroyBody(Body* body);
+    int kind_or(const Body* body = nullptr, int fallback = -1) const;
+    void Set(const Vec2* points, int count);   // not bound: an array
+};
+```
+
+```python
+world = World()
+body = world.CreateBody(BodyDef())
+world.kind_or(body)
+world.kind_or(None)          # the header defaults it, so None is nullptr
+world.kind_or()              # the same call
+world.CreateBody(None)       # TypeError: no default, so no None
+world.DestroyBody(body)      # `body` now dangles, as it would in C++
+```
+
+**`None`.** A null pointer is passed only where the header says one is
+expected, and the one place a signature says that is a default argument. Every
+other pointer parameter refuses `None` with a `TypeError`. Libraries routinely
+dereference a pointer parameter without checking it, and an exception is a
+better answer than a crash inside the library. The stub agrees:
+`body: Body | None = ...` for the defaulted parameter and `def_: BodyDef` for
+the other.
+
+**Arrays.** `Set(const Vec2* points, int count)` reads `count` objects, and
+binding it would let `shape.Set(vec, 8)` read seven objects past one. The
+types do not tell that apart from `addWidget(Widget* w, int stretch)`, which
+takes one object; the parameter names do. A pointer is taken to be an array
+when the parameter before or after it is an integer whose name contains
+`count`, `size`, `len`, `num` or `capacity`, or is `n`, `nb`, `cnt` or `sz`,
+or is an integer with no name at all. `generate` lists such a method as
+declined and says why.
+
+**Overloads.** Where a class declares both `f(const T&)` and `f(T*)`, a call
+with an object goes to the reference overload, whichever is declared first.
+That is the overload such a call reached before pointer parameters were
+bound, so no existing call changes its target.
+
+**What a pointer parameter assumes, and no signature can tell it**, the same
+as for a `T&` parameter:
+
+- *The callee does not keep the pointer.* `world.SetContactListener(listener)`
+  stores it. Keep the Python object alive yourself for as long as the world
+  uses it, as you would in C++; nothing does that for you yet.
+- *The callee does not free it, unless the library owns it already.*
+  `world.DestroyBody(body)` is fine, since `body` is a borrow the world owns.
+  Passing an object Python constructed to a method that deletes its argument
+  frees it twice.
+- *The pointer is to one object.* An array passed with no count in the
+  signature cannot be told from a single object.
+
+Constructors are left out because a constructor that takes a pointer nearly
+always keeps it, and the new object cannot yet hold its argument alive. A
+class whose only useful constructor takes a pointer still binds, with that
+constructor missing.
 
 ## Const Correctness
 
@@ -811,7 +886,8 @@ cannot cross is something you hear about from `generate` rather than from an
 
 | Shape | Status | What to write instead |
 |-------|--------|-----------------------|
-| `T*` as a parameter | Not bound | A pointer says nothing about who owns the thing. Take `T&`, which aliases the Python object |
+| `T*` as a parameter of a method, `T` a bound class | Python: bound, takes the wrapper's own object. Lua, JavaScript: not bound | Nothing. See [Pointer parameters](#pointer-parameters-python) for `None`, arrays and what it assumes |
+| `T*` as a parameter of a constructor or a free function | Not bound | Take `T&`, which aliases the Python object |
 | `T*` returned by an instance method, `T` a bound class | Python: bound, a borrow that keeps the owner alive. Lua, JavaScript: not bound | Nothing. See [Pointer returns](#pointer-returns-python) for what it assumes about lifetime |
 | `const T*` as a return | Not bound | Return `const T&`, which crosses as a copy, or add a non-`const` overload |
 | `T*` returned by a static method or free function | Not bound | There is no owner to keep alive. Return by value or by `unique_ptr`, or make it a method of the owner |

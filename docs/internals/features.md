@@ -172,7 +172,7 @@ other value is refused rather than becoming a null pointer.
 
 | Limitation | Status |
 |------------|--------|
-| Raw pointers (T*) | Python: a `T*` an instance method returns is a borrow that keeps its owner alive. `const T*`, pointer parameters, and pointer returns in Lua and JavaScript are not supported |
+| Raw pointers (T*) | Python: a `T*` an instance method returns is a borrow that keeps its owner alive, and a `T*` or `const T*` method parameter takes a wrapped object. `const T*` returns, pointer parameters of constructors and free functions, pointer data members, and pointers in Lua and JavaScript are not supported |
 | `std::optional` | Supported |
 | `std::variant` | Supported |
 | `std::tuple`/`std::pair` | Supported |
