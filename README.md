@@ -209,6 +209,7 @@ See [the CLI reference](docs/reference/cli.md#csharp-output).
 | **Smart Pointers** | ⚠️ | ⚠️ | ⚠️ | ❌ |
 | **Borrowed pointer returns** | ✅ | ❌ | ❌ | ✅ |
 | **Pointer parameters** | ✅ | ❌ | ❌ | ❌ |
+| **C array members** (`float m[16]`, `char name[64]`) | ✅ | ✅ | ✅ | ❌ |
 | **Exception Handling** | ✅ | ✅ | ✅ | ✅ |
 | **Cross-Module Types** | ✅ | ❌ | ❌ | ❌ |
 | **Zero-Copy Buffers** | ✅ | ❌ | ❌ | ❌ |
