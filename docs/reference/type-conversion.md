@@ -156,6 +156,13 @@ view, and it used to arrive empty.
 |----------|--------|-----|------------|
 | `std::map<K, V>` | `dict` | `table` | `Object` |
 | `std::unordered_map<K, V>` | `dict` | `table` | `Object` |
+| `std::multimap<K, V>`, `std::unordered_multimap<K, V>` | `list` of `(key, value)` | array of `{key, value}` | `Array` of `[key, value]` |
+
+A key may repeat in a multimap, so it is not a dict: it reads as its pairs,
+in the container's own order, and is written from the same shape. Python also
+takes a `dict` and Lua a `key = value` table, for the common case of one value
+per key. A value that is not pairs of the right types is refused whole and
+leaves the target as it was.
 
 ## Nested Objects
 

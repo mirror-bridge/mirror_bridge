@@ -178,6 +178,10 @@ template<typename K, typename V, typename... Args>
 bool from_lua(lua_State* L, int idx, std::map<K, V, Args...>& map);
 template<typename K, typename V, typename... Args>
 bool from_lua(lua_State* L, int idx, std::unordered_map<K, V, Args...>& map);
+template<typename K, typename V, typename... Args>
+bool from_lua(lua_State* L, int idx, std::multimap<K, V, Args...>& map);
+template<typename K, typename V, typename... Args>
+bool from_lua(lua_State* L, int idx, std::unordered_multimap<K, V, Args...>& map);
 template<typename V, typename... Args>
 bool from_lua(lua_State* L, int idx, std::set<V, Args...>& set);
 template<typename V, typename... Args>
@@ -723,6 +727,66 @@ bool from_lua(lua_State* L, int idx, std::pair<T1, T2>& p) {
     lua_pop(L, 1);
 
     return true;
+}
+
+// std::multimap and std::unordered_multimap.
+//
+// A key may repeat, so neither reads as a key = value table: each reads as
+// an array of {key, value} pairs through the generic container conversion.
+// Writing went through that conversion too, which builds every element as
+// the container's value_type, and a multimap's value_type is pair<const K,
+// V>: nothing can be converted into a const key, so a class with one such
+// member was a compile error for the whole module.
+//
+// Takes what one reads as, an array of pairs, and also a key = value table
+// for the common case of one value per key (which is also what an empty
+// table is). Built aside and moved in, so a table that fails half way leaves
+// the target as it was.
+template<typename Multimap>
+bool multimap_from_lua(lua_State* L, int idx, Multimap& out) {
+    if (!lua_istable(L, idx)) return false;
+    // Every push below shifts a relative index.
+    idx = lua_absindex(L, idx);
+
+    using Entry = std::pair<typename Multimap::key_type, typename Multimap::mapped_type>;
+    Multimap filled;
+
+    const lua_Unsigned length = lua_rawlen(L, idx);
+    if (length > 0) {
+        for (lua_Unsigned i = 1; i <= length; ++i) {
+            lua_rawgeti(L, idx, static_cast<lua_Integer>(i));
+            Entry entry;
+            const bool converted = from_lua(L, -1, entry);
+            lua_pop(L, 1);
+            if (!converted) return false;
+            filled.emplace(std::move(entry));
+        }
+    } else {
+        lua_pushnil(L);
+        while (lua_next(L, idx) != 0) {
+            Entry entry;
+            // Value is at -1, key is at -2
+            if (!from_lua(L, -2, entry.first) || !from_lua(L, -1, entry.second)) {
+                lua_pop(L, 2);
+                return false;
+            }
+            filled.emplace(std::move(entry));
+            lua_pop(L, 1);
+        }
+    }
+
+    out = std::move(filled);
+    return true;
+}
+
+template<typename K, typename V, typename... Args>
+bool from_lua(lua_State* L, int idx, std::multimap<K, V, Args...>& map) {
+    return multimap_from_lua(L, idx, map);
+}
+
+template<typename K, typename V, typename... Args>
+bool from_lua(lua_State* L, int idx, std::unordered_multimap<K, V, Args...>& map) {
+    return multimap_from_lua(L, idx, map);
 }
 
 // ============================================================================

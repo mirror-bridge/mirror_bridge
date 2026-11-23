@@ -256,6 +256,10 @@ template<typename K, typename V, typename... Args>
 bool from_javascript(napi_env env, napi_value value, std::map<K, V, Args...>& map);
 template<typename K, typename V, typename... Args>
 bool from_javascript(napi_env env, napi_value value, std::unordered_map<K, V, Args...>& map);
+template<typename K, typename V, typename... Args>
+bool from_javascript(napi_env env, napi_value value, std::multimap<K, V, Args...>& map);
+template<typename K, typename V, typename... Args>
+bool from_javascript(napi_env env, napi_value value, std::unordered_multimap<K, V, Args...>& map);
 template<typename V, typename... Args>
 bool from_javascript(napi_env env, napi_value value, std::set<V, Args...>& set);
 template<typename V, typename... Args>
@@ -891,6 +895,49 @@ bool from_javascript(napi_env env, napi_value value, std::pair<T1, T2>& p) {
     napi_get_element(env, value, 1, &second);
 
     return from_javascript(env, first, p.first) && from_javascript(env, second, p.second);
+}
+
+// std::multimap and std::unordered_multimap.
+//
+// A key may repeat, so neither reads as an object: each reads as an Array of
+// [key, value] pairs through the generic container conversion. Writing went
+// through that conversion too, which builds every element as the container's
+// value_type, and a multimap's value_type is pair<const K, V>: nothing can
+// be converted into a const key, so a class with one such member was a
+// compile error for the whole module.
+//
+// Takes what one reads as, an Array of pairs. Built aside and moved in, so
+// an Array that fails half way leaves the target as it was.
+template<typename Multimap>
+bool multimap_from_javascript(napi_env env, napi_value value, Multimap& out) {
+    bool is_array = false;
+    if (napi_is_array(env, value, &is_array) != napi_ok || !is_array) return false;
+
+    uint32_t length = 0;
+    if (napi_get_array_length(env, value, &length) != napi_ok) return false;
+
+    using Entry = std::pair<typename Multimap::key_type, typename Multimap::mapped_type>;
+    Multimap filled;
+    for (uint32_t i = 0; i < length; ++i) {
+        napi_value js_item;
+        if (napi_get_element(env, value, i, &js_item) != napi_ok) return false;
+        Entry entry;
+        if (!from_javascript(env, js_item, entry)) return false;
+        filled.emplace(std::move(entry));
+    }
+
+    out = std::move(filled);
+    return true;
+}
+
+template<typename K, typename V, typename... Args>
+bool from_javascript(napi_env env, napi_value value, std::multimap<K, V, Args...>& map) {
+    return multimap_from_javascript(env, value, map);
+}
+
+template<typename K, typename V, typename... Args>
+bool from_javascript(napi_env env, napi_value value, std::unordered_multimap<K, V, Args...>& map) {
+    return multimap_from_javascript(env, value, map);
 }
 
 // ============================================================================
