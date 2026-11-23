@@ -1174,6 +1174,37 @@ consteval bool is_param_bindable() {
     return false;
 }
 
+// The returns no backend can carry, whatever converters it has. Ret is not
+// void.
+//
+//   * A pointer, except `const char*`. A returned pointer says nothing about
+//     who owns the thing. `const char*` is the one whose convention is
+//     settled: the caller borrows it, and every backend copies it into its
+//     own string before anything else can run. `char*` stays refused, since
+//     by convention that one is the caller's to free. (Python then admits a
+//     pointer to a class from an instance method, as a borrow; that is its
+//     own rule, added on top of this one.)
+//   * A value the call site would have to destroy and cannot. A reference to
+//     V itself is fine; a reference to a wrapper of one (`const
+//     std::optional<V>&`) is not, because converting it still instantiates
+//     the wrapper. Asked before anything that instantiates the type.
+//   * A raw pointer nested in a standard template (`std::pair<Node*, bool>`,
+//     `std::vector<Node*>`), for which the outer type's own answer would be
+//     wrong.
+template<typename Ret>
+consteval bool return_is_refused_everywhere() {
+    using Clean = std::remove_cvref_t<Ret>;
+    if constexpr (std::is_pointer_v<Clean>) {
+        return !std::is_same_v<Clean, const char*>;
+    } else if constexpr ((!std::is_reference_v<Ret> ||
+                          std::meta::has_template_arguments(std::meta::dealias(^^Clean))) &&
+                         value_cannot_be_destroyed<Clean>()) {
+        return true;
+    } else {
+        return carries_nested_raw_pointer<Clean>();
+    }
+}
+
 template<typename ParamType>
 struct param_storage {
     using Clean = std::remove_cvref_t<ParamType>;
@@ -1209,6 +1240,178 @@ consteval bool static_method_params_all_bindable() {
     return []<std::size_t... Is>(std::index_sequence<Is...>) {
         return (is_param_bindable<static_method_param_t<T, FuncIndex, Is>>() && ...);
     }(std::make_index_sequence<param_count>{});
+}
+
+// ============================================================================
+// Which Methods a Convert-Call-Convert Backend Can Call
+// ============================================================================
+//
+// Lua and JavaScript call a method the same way: convert each argument into
+// a local of the parameter's value type, move those locals into the call, and
+// convert what comes back. Neither asked first whether a given method allows
+// those three steps, so a class with one method that does not -- a pointer
+// return, a `void*` parameter, a non-const reference -- was a compile error
+// for every class in the module. Any factory-style library has such a method.
+//
+// The question is the same for both and is asked here once. A backend says
+// what it can read and write through a small struct:
+//
+//   struct Conversions {
+//       static constexpr const char* language = "Lua";
+//       template<typename Value> static consteval bool reads();   // from the language
+//       template<typename Value> static consteval bool writes();  // to the language
+//   };
+//
+// (Python does not use this. It calls through pointer holders and borrows,
+// and has its own, older gate in method_fully_bindable.)
+
+template<typename Backend, typename Param>
+consteval bool call_param_bindable() {
+    using Value = std::remove_cvref_t<Param>;
+    if constexpr (!is_param_bindable<Param>()) {
+        // The refusals every backend shares: a raw pointer, a pointer nested
+        // in a standard template, a type that is not complete.
+        return false;
+    } else if constexpr (std::is_lvalue_reference_v<Param> &&
+                         !std::is_const_v<std::remove_reference_t<Param>>) {
+        // The callee writes through it, and the argument is a local built
+        // from the caller's value: the write would be lost.
+        return false;
+    } else if constexpr (!std::is_default_constructible_v<Value>) {
+        // The local has to exist before the conversion fills it.
+        return false;
+    } else {
+        return Backend::template reads<Value>();
+    }
+}
+
+template<typename Backend, typename Ret>
+consteval bool call_return_bindable() {
+    using Value = std::remove_cvref_t<Ret>;
+    if constexpr (std::is_void_v<Ret>) {
+        return true;
+    } else if constexpr (return_is_refused_everywhere<Ret>()) {
+        return false;
+    } else if constexpr (names_incomplete_class(^^Value)) {
+        return false;
+    } else {
+        return Backend::template writes<Value>();
+    }
+}
+
+// Whether the call itself compiles once the locals exist. This is the step
+// the two above cannot see: an overload that takes T&& of a type that cannot
+// be moved, a parameter whose value type does not convert back to it.
+template<typename T, std::size_t FuncIndex, std::size_t... Is>
+consteval bool method_call_is_well_formed(std::index_sequence<Is...>) {
+    constexpr auto member_func = get_member_function<T, FuncIndex>();
+    return requires(T& self, std::remove_cvref_t<method_param_t<T, FuncIndex, Is>>&... args) {
+        (self.[:member_func:])(std::move(args)...);
+    };
+}
+
+template<typename T, std::size_t FuncIndex, std::size_t... Is>
+consteval bool static_call_is_well_formed(std::index_sequence<Is...>) {
+    constexpr auto member_func = get_static_member_function<T, FuncIndex>();
+    return requires(std::remove_cvref_t<static_method_param_t<T, FuncIndex, Is>>&... args) {
+        [:member_func:](std::move(args)...);
+    };
+}
+
+// Which step a method fails at. One function answers "is it bound" and "why
+// not", so the binding and the report cannot disagree.
+enum class CallDecline { none, parameter, return_type, call };
+
+template<typename Backend, typename T, std::size_t FuncIndex>
+consteval CallDecline method_call_decline() {
+    constexpr std::size_t param_count = get_method_param_count<T, FuncIndex>();
+    using Ret = typename [:get_method_return_type<T, FuncIndex>():];
+    constexpr bool params_convert = []<std::size_t... Is>(std::index_sequence<Is...>) {
+        return (call_param_bindable<Backend, method_param_t<T, FuncIndex, Is>>() && ...);
+    }(std::make_index_sequence<param_count>{});
+    if constexpr (!params_convert) {
+        return CallDecline::parameter;
+    } else if constexpr (!call_return_bindable<Backend, Ret>()) {
+        return CallDecline::return_type;
+    } else if constexpr (!method_call_is_well_formed<T, FuncIndex>(
+                             std::make_index_sequence<param_count>{})) {
+        return CallDecline::call;
+    } else {
+        return CallDecline::none;
+    }
+}
+
+template<typename Backend, typename T, std::size_t FuncIndex>
+consteval CallDecline static_method_call_decline() {
+    constexpr std::size_t param_count = get_static_method_param_count<T, FuncIndex>();
+    using Ret = typename [:get_static_method_return_type<T, FuncIndex>():];
+    constexpr bool params_convert = []<std::size_t... Is>(std::index_sequence<Is...>) {
+        return (call_param_bindable<Backend, static_method_param_t<T, FuncIndex, Is>>() && ...);
+    }(std::make_index_sequence<param_count>{});
+    if constexpr (!params_convert) {
+        return CallDecline::parameter;
+    } else if constexpr (!call_return_bindable<Backend, Ret>()) {
+        return CallDecline::return_type;
+    } else if constexpr (!static_call_is_well_formed<T, FuncIndex>(
+                             std::make_index_sequence<param_count>{})) {
+        return CallDecline::call;
+    } else {
+        return CallDecline::none;
+    }
+}
+
+template<typename Backend, typename T, std::size_t FuncIndex>
+consteval bool method_call_bindable() {
+    return method_call_decline<Backend, T, FuncIndex>() == CallDecline::none;
+}
+
+template<typename Backend, typename T, std::size_t FuncIndex>
+consteval bool static_method_call_bindable() {
+    return static_method_call_decline<Backend, T, FuncIndex>() == CallDecline::none;
+}
+
+template<typename Backend>
+void report_declined_call(const char* class_name, const char* method, CallDecline why) {
+    switch (why) {
+        case CallDecline::none:
+            return;
+        case CallDecline::parameter:
+            std::fprintf(stderr,
+                "mirror_bridge: skipped method '%s::%s' (a parameter has no conversion from %s)\n",
+                class_name, method, Backend::language);
+            return;
+        case CallDecline::return_type:
+            std::fprintf(stderr,
+                "mirror_bridge: skipped method '%s::%s' (the return type has no conversion to %s)\n",
+                class_name, method, Backend::language);
+            return;
+        case CallDecline::call:
+            std::fprintf(stderr,
+                "mirror_bridge: skipped method '%s::%s' (it cannot be called with arguments "
+                "built from %s values)\n", class_name, method, Backend::language);
+            return;
+    }
+}
+
+// One line per method left out, when asked, in the shape the Python backend
+// prints and the CLI parses.
+template<typename Backend, typename T>
+void report_declined_calls(const char* class_name) {
+    if (!declined_report_requested()) return;
+    [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+        ([&] {
+            constexpr CallDecline why = method_call_decline<Backend, T, Is>();
+            constexpr auto method_name_sv = std::meta::identifier_of(get_member_function<T, Is>());
+            report_declined_call<Backend>(class_name, method_name_sv.data(), why);
+        }(), ...);
+    }(std::make_index_sequence<get_member_function_count<T>()>{});
+    [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+        ([&] {
+            constexpr CallDecline why = static_method_call_decline<Backend, T, Is>();
+            report_declined_call<Backend>(class_name,
+                                          get_static_member_function_name<T, Is>(), why);
+        }(), ...);
+    }(std::make_index_sequence<get_static_member_function_count<T>()>{});
 }
 
 // Nested member utilities (for dict/object conversion)
@@ -3439,6 +3642,35 @@ napi_value js_setter(napi_env env, napi_callback_info info) {
 // Method Binding
 // ============================================================================
 
+// What this backend can read and write, for core's method gate. A method
+// whose parameters and return do not pass it is left out by name, where it
+// used to be a compile error for every class in the module.
+struct JsConversions {
+    static constexpr const char* language = "JavaScript";
+
+    template<typename Value>
+    static consteval bool reads() {
+        return requires(napi_env env, napi_value js, Value& value) {
+            from_javascript(env, js, value);
+        };
+    }
+
+    template<typename Value>
+    static consteval bool writes() {
+        return requires(napi_env env, const Value& value) { to_javascript(env, value); };
+    }
+};
+
+template<typename T, std::size_t FuncIndex>
+consteval bool js_method_bindable() {
+    return core::method_call_bindable<JsConversions, T, FuncIndex>();
+}
+
+template<typename T, std::size_t FuncIndex>
+consteval bool js_static_method_bindable() {
+    return core::static_method_call_bindable<JsConversions, T, FuncIndex>();
+}
+
 template<typename T, std::size_t FuncIndex, std::size_t... Is>
 napi_value call_method_impl(napi_env env, T* self, napi_value* args, std::index_sequence<Is...>) {
     constexpr auto member_func = get_member_function<T, FuncIndex>();
@@ -3893,6 +4125,8 @@ napi_value bind_class_when_bindable(napi_env env, napi_value exports, const char
 
 template<Bindable T>
 napi_value bind_class_impl(napi_env env, napi_value exports, const char* name) {
+    core::report_declined_calls<JsConversions, T>(name);
+
     static_assert(core::type_key_is_distinctive<T>(),
         "bind_class<T>: this compiler cannot spell T distinctly, so T would compare "
         "equal to another specialisation and the boundary check could not tell them "
@@ -3953,15 +4187,21 @@ napi_value bind_class_impl(napi_env env, napi_value exports, const char* name) {
     // Add instance methods
     [&]<std::size_t... Is>(std::index_sequence<Is...>) {
         ([&] {
-            constexpr auto method_name_sv = std::meta::identifier_of(get_member_function<T, Is>());
-            constexpr auto method_name = method_name_sv.data();
+            // A method this backend cannot call is not put on the prototype.
+            // Where a name is overloaded the last one set is the one a caller
+            // reaches, so this also keeps an overload that cannot be called
+            // from replacing one that can.
+            if constexpr (js_method_bindable<T, Is>()) {
+                constexpr auto method_name_sv = std::meta::identifier_of(get_member_function<T, Is>());
+                constexpr auto method_name = method_name_sv.data();
 
-            napi_value fn;
-            napi_create_function(env, method_name, NAPI_AUTO_LENGTH, js_method<T, Is>, nullptr, &fn);
+                napi_value fn;
+                napi_create_function(env, method_name, NAPI_AUTO_LENGTH, js_method<T, Is>, nullptr, &fn);
 
-            napi_value prototype;
-            napi_get_named_property(env, constructor, "prototype", &prototype);
-            napi_set_named_property(env, prototype, method_name, fn);
+                napi_value prototype;
+                napi_get_named_property(env, constructor, "prototype", &prototype);
+                napi_set_named_property(env, prototype, method_name, fn);
+            }
         }(), ...);
     }(std::make_index_sequence<method_count>{});
 
@@ -3969,13 +4209,15 @@ napi_value bind_class_impl(napi_env env, napi_value exports, const char* name) {
     if constexpr (static_method_count > 0) {
         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
             ([&] {
-                constexpr auto method_name = get_static_member_function_name<T, Is>();
+                if constexpr (js_static_method_bindable<T, Is>()) {
+                    constexpr auto method_name = get_static_member_function_name<T, Is>();
 
-                napi_value fn;
-                napi_create_function(env, method_name, NAPI_AUTO_LENGTH, js_static_method<T, Is>, nullptr, &fn);
+                    napi_value fn;
+                    napi_create_function(env, method_name, NAPI_AUTO_LENGTH, js_static_method<T, Is>, nullptr, &fn);
 
-                // Add to constructor (not prototype) for static methods
-                napi_set_named_property(env, constructor, method_name, fn);
+                    // Add to constructor (not prototype) for static methods
+                    napi_set_named_property(env, constructor, method_name, fn);
+                }
             }(), ...);
         }(std::make_index_sequence<static_method_count>{});
     }
