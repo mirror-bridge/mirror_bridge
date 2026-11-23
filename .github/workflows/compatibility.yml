@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     # Needs the reflection compiler, plus git and network to fetch the corpus.
     container:
-      image: ghcr.io/franciscothiesen/mirror_bridge:latest
+      image: ghcr.io/mirror-bridge/mirror_bridge:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

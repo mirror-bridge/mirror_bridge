@@ -20,7 +20,7 @@ jobs:
   benchmark:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/franciscothiesen/mirror_bridge-benchmark:latest
+      image: ghcr.io/mirror-bridge/mirror_bridge-benchmark:latest
     steps:
       - uses: actions/checkout@v4
 

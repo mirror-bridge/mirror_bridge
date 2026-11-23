@@ -8,7 +8,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: franciscothiesen/mirror_bridge
+  IMAGE_NAME: mirror-bridge/mirror_bridge
 
 jobs:
   # ============================================================================
@@ -18,7 +18,7 @@ jobs:
     name: Python Bindings (Clang)
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/franciscothiesen/mirror_bridge:latest
+      image: ghcr.io/mirror-bridge/mirror_bridge:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -53,7 +53,7 @@ jobs:
     name: Lua Bindings (Clang)
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/franciscothiesen/mirror_bridge:latest
+      image: ghcr.io/mirror-bridge/mirror_bridge:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -76,7 +76,7 @@ jobs:
     name: JavaScript Bindings - Node.js (Clang)
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/franciscothiesen/mirror_bridge:latest
+      image: ghcr.io/mirror-bridge/mirror_bridge:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -105,7 +105,7 @@ jobs:
     name: JavaScript Bindings - V8 Direct (Clang)
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/franciscothiesen/mirror_bridge:latest
+      image: ghcr.io/mirror-bridge/mirror_bridge:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -180,7 +180,7 @@ jobs:
     name: Python Bindings (GCC)
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/franciscothiesen/mirror_bridge-gcc:latest
+      image: ghcr.io/mirror-bridge/mirror_bridge-gcc:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

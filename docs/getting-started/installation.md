@@ -38,7 +38,7 @@ The Docker container includes:
 - Node.js with N-API headers
 - All your changes preserved between sessions
 
-(A GCC 16 reflection image is also available: `ghcr.io/franciscothiesen/mirror_bridge-gcc`.)
+(A GCC 16 reflection image is also available: `ghcr.io/mirror-bridge/mirror_bridge-gcc`.)
 
 ### Container Management
 

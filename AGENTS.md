@@ -24,8 +24,8 @@ from source (~45–90 min).
 ./start_dev_container.sh
 
 # Or pull directly
-docker pull ghcr.io/franciscothiesen/mirror_bridge:latest
-docker tag  ghcr.io/franciscothiesen/mirror_bridge:latest mirror_bridge:latest
+docker pull ghcr.io/mirror-bridge/mirror_bridge:latest
+docker tag  ghcr.io/mirror-bridge/mirror_bridge:latest mirror_bridge:latest
 ```
 
 `start_dev_container.sh` creates a persistent container named `mirror_bridge_dev` with the repo

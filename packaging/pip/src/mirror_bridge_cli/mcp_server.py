@@ -22,7 +22,7 @@ from mcp.server.fastmcp import FastMCP
 from . import _docker, _ensure_executable, _ensure_image, _runtime_dir, RUNTIME_MOUNT
 
 DEFAULT_IMAGE = os.environ.get(
-    "MIRROR_BRIDGE_IMAGE", "ghcr.io/franciscothiesen/mirror_bridge:latest"
+    "MIRROR_BRIDGE_IMAGE", "ghcr.io/mirror-bridge/mirror_bridge:latest"
 )
 
 mcp = FastMCP("mirror_bridge")

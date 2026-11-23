@@ -20,7 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-DEFAULT_IMAGE = "ghcr.io/franciscothiesen/mirror_bridge:latest"
+DEFAULT_IMAGE = "ghcr.io/mirror-bridge/mirror_bridge:latest"
 RUNTIME_MOUNT = "/opt/mirror_bridge_runtime"
 
 # Scripts that must be executable inside the container. Wheel installation

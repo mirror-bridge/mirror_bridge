@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-15
 **Environment:** Ubuntu 22.04 container, clang-p2996, Eigen 3.4, libfmt 8.1
-**Reproducibility:** All commands run via `docker run ghcr.io/franciscothiesen/mirror_bridge:latest`
+**Reproducibility:** All commands run via `docker run ghcr.io/mirror-bridge/mirror_bridge:latest`
 
 This document records the actual process and results of attempting a full port
 of Open3D's C++ API to Python via mirror_bridge. Every claim here is backed by
@@ -19,7 +19,7 @@ class via C++26 reflection?
 
 ```bash
 git clone --depth 1 https://github.com/isl-org/Open3D.git
-docker pull ghcr.io/franciscothiesen/mirror_bridge:latest
+docker pull ghcr.io/mirror-bridge/mirror_bridge:latest
 # Inside the container: apt install libeigen3-dev libfmt-dev
 ```
 
@@ -253,7 +253,7 @@ cd mirror_bridge
 
 # Run the container
 docker run -it --rm -v $(pwd):/workspace -v $(pwd)/../Open3D:/Open3D \
-    ghcr.io/franciscothiesen/mirror_bridge:latest bash
+    ghcr.io/mirror-bridge/mirror_bridge:latest bash
 
 # Inside the container:
 apt-get update && apt-get install -y libeigen3-dev libfmt-dev

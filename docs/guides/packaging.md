@@ -117,7 +117,7 @@ Since mirror_bridge requires Bloomberg's clang-p2996, you'll typically build ins
 
 ```bash
 # Build inside Docker
-docker run --rm -v $(pwd):/workspace ghcr.io/franciscothiesen/mirror_bridge:latest \
+docker run --rm -v $(pwd):/workspace ghcr.io/mirror-bridge/mirror_bridge:latest \
     bash -c "cd /workspace && mirror_bridge generate src/ --module my_lib --lang python"
 
 # Now package locally (only needs the pre-built .so)
