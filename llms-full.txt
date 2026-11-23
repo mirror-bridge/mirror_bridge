@@ -5486,6 +5486,49 @@ always keeps it, and the new object cannot yet hold its argument alive. A
 class whose only useful constructor takes a pointer still binds, with that
 constructor missing.
 
+### Callbacks and their reference arguments (Python)
+
+A `std::function` parameter takes any Python callable. When C++ calls it, each
+argument is converted the way a return value is, with one exception that
+matters: **a non-`const` reference to a bound class is the caller's own
+object, lent for the call.**
+
+```cpp
+using Handler = std::function<void(const Request&, Response&)>;
+void Server::Get(const std::string& pattern, Handler handler);
+```
+
+```python
+def hello(request, response):
+    response.set_content("hello", "text/plain")   # lands in the server's Response
+
+server.Get("/hi", hello)
+```
+
+The `Response&` is where the answer goes, so a copy would be an answer thrown
+away. The object is only promised to exist until the callback returns, so the
+wrapper is taken back at that point. If the callback kept it, it stops holding
+an object, and every later use raises:
+
+```python
+kept = []
+server.Get("/hi", lambda request, response: kept.append(response))
+...
+kept[0].status   # RuntimeError: this object was an argument to a callback and
+                 # was only valid until that callback returned
+```
+
+| Callback argument | Reaches Python as |
+|-------------------|-------------------|
+| `T&`, `T` a bound class | the caller's object, valid until the callback returns |
+| `const T&` or `T` | a copy, which the callback may keep |
+| `int&`, `std::string&` and other values | the value. A write does not travel back |
+
+What the take-back does not reach is anything made *from* the argument during
+the call: a view of one of its members, or an object borrowed from one of its
+methods. Keeping one of those past the callback is the same mistake it would be
+in C++.
+
 ## Const Correctness
 
 Const methods are supported and bound correctly:
@@ -7135,6 +7178,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A reference a C++ library passes to a Python callback is the library's own object, lent for the call, and a C++ HTTP server now answers with what a Python handler wrote.** `std::function<void(const Request&, Response&)>` is how a library asks to be called back, and the `Response&` is where the answer goes. It reached Python as a copy, so the handler filled in an object that was thrown away: cpp-httplib, bound with no binding code, served a `200` with an empty body. A non-`const` reference to a bound class now crosses as a wrapper over the caller's object. That object is only promised to exist until the callback returns, so the wrapper is taken back at that point, on the exception path too: one the callback kept stops holding an object, and reading it, writing it, calling it, passing it back to C++, copying or pickling it each raise instead of touching freed memory. The error says it was a callback argument, where the nine places that reported an empty wrapper all used to blame the constructor. A `const T&` still crosses as a copy the callback may keep.
 - **In Lua and JavaScript a method that cannot be called costs itself, where it cost the module.** Both backends call a method by converting each argument into a local, moving the locals into the call and converting the result, and neither asked first whether a given method allows that. A pointer return, a `void*` or function pointer parameter, a non-`const` reference, a parameter type with no default constructor: any one of them, on any class, was a compile error for every class in the module, which rules out every factory-style library there is. The question is now asked once, in `core`, of whichever backend is compiling (it supplies only what it can read and write), and a method that fails it is left out by name. Its class binds with everything else. Where a name is overloaded, an overload that cannot be called no longer hides one that can: Lua reaches the first overload offered and JavaScript the last, and each has a test for the order that used to break. `MIRROR_BRIDGE_REPORT_DECLINED=1` names each method left out and the step it failed at, in the line shape Python prints. The gate only ever turns a compile error into a missing method: wherever the backend's own overloads can answer, they do, so a mutable `char*` is still a string in these two backends although Python refuses it, and a handle type with a converter supplied by the binding keeps its methods.
 - **A data member with no conversion costs itself, not its class, and Dear ImGui went from no module to all 43 of its classes.** One raw pointer field used to get its whole class skipped under auto discovery, with every method the class has: `ImGuiIO`, `ImDrawList` and seventeen more of imgui's classes, and box2d's `b2FixtureDef` and `b2JointDef`, which is every way of putting a shape or a joint into a world. The member is now what is left out. The class binds with its other members and all its methods, and `generate` names each member it dropped under its own heading and in `--json` as `"kind": "member"`. The decision is made in one place, the list of members in `core` that every getter, setter, repr, table conversion and stub reads, so it holds for Python, Lua and JavaScript at once. The member is still part of the C++ object and travels with every C++ copy; a class that has one does not pickle, since the state could not hold it. Measured on imgui v1.92.9b: 0 classes (the module did not compile), then 24 with C array members carried, now 43, with 68 members named as left out.
   - **`bind_class_when_bindable` exists in Lua and JavaScript, and `generate` emits it.** Those backends were handed `bind_class`, whose `static_assert` made one such member a compile error for the whole module.

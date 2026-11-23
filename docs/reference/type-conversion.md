@@ -531,6 +531,49 @@ always keeps it, and the new object cannot yet hold its argument alive. A
 class whose only useful constructor takes a pointer still binds, with that
 constructor missing.
 
+### Callbacks and their reference arguments (Python)
+
+A `std::function` parameter takes any Python callable. When C++ calls it, each
+argument is converted the way a return value is, with one exception that
+matters: **a non-`const` reference to a bound class is the caller's own
+object, lent for the call.**
+
+```cpp
+using Handler = std::function<void(const Request&, Response&)>;
+void Server::Get(const std::string& pattern, Handler handler);
+```
+
+```python
+def hello(request, response):
+    response.set_content("hello", "text/plain")   # lands in the server's Response
+
+server.Get("/hi", hello)
+```
+
+The `Response&` is where the answer goes, so a copy would be an answer thrown
+away. The object is only promised to exist until the callback returns, so the
+wrapper is taken back at that point. If the callback kept it, it stops holding
+an object, and every later use raises:
+
+```python
+kept = []
+server.Get("/hi", lambda request, response: kept.append(response))
+...
+kept[0].status   # RuntimeError: this object was an argument to a callback and
+                 # was only valid until that callback returned
+```
+
+| Callback argument | Reaches Python as |
+|-------------------|-------------------|
+| `T&`, `T` a bound class | the caller's object, valid until the callback returns |
+| `const T&` or `T` | a copy, which the callback may keep |
+| `int&`, `std::string&` and other values | the value. A write does not travel back |
+
+What the take-back does not reach is anything made *from* the argument during
+the call: a view of one of its members, or an object borrowed from one of its
+methods. Keeping one of those past the callback is the same mistake it would be
+in C++.
+
 ## Const Correctness
 
 Const methods are supported and bound correctly:

@@ -347,6 +347,14 @@ if(MIRROR_BRIDGE_BUILD_PYTHON)
         )
     endif()
 
+    # A T& argument to a Python callback is the caller's object for the call
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/callback_references)
+        mirror_bridge_python_module(callback_references
+            callback_references/callback_references_binding.cpp
+            INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/callback_references
+        )
+    endif()
+
     # std::multimap and std::unordered_multimap cross as a list of pairs
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/multimap)
         mirror_bridge_python_module(multimap

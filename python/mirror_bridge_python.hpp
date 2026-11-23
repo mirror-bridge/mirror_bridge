@@ -883,6 +883,47 @@ inline PyObject* to_python(const std::shared_future<T>& fut) {
 // - Return value conversion from Python to C++
 // - Exception propagation from Python to C++
 
+// A reference argument is the caller's own object, lent for the call.
+//
+// `std::function<void(const Request&, Response&)>` is how a C++ library asks
+// to be called back, and the `Response&` is where the answer goes. Converted
+// like any other value it reached Python as a copy, so a handler written in
+// Python filled in a Response that was thrown away and the library saw
+// nothing: cpp-httplib served a 200 with an empty body.
+//
+// A non-const lvalue reference to a bound class now crosses as a wrapper
+// over the caller's object. That object is only promised to exist until the
+// callback returns, so the wrapper is taken back at that point: one that
+// Python kept stops holding an object, and using it raises instead of
+// reading freed memory. A `const T&` still crosses as a copy, which is what
+// const promises and what a handler may keep.
+//
+// The parts that need the wrapper layout are defined with the other borrows.
+template<typename Clean>
+consteval bool is_wrapper_backed_class();
+
+template<typename Arg>
+consteval bool callback_argument_is_lent() {
+    if constexpr (!std::is_lvalue_reference_v<Arg>) {
+        return false;
+    } else {
+        using Referred = std::remove_reference_t<Arg>;
+        if constexpr (std::is_const_v<Referred> || !requires { sizeof(Referred); }) {
+            return false;
+        } else {
+            return is_wrapper_backed_class<Referred>();
+        }
+    }
+}
+
+// A new reference to a wrapper over `object`, with `lent` set, or the
+// ordinary conversion when no loaded module binds the class.
+template<typename Class>
+PyObject* lend_for_call(Class& object, bool& lent);
+
+// Takes a lent wrapper's object away from it. See lend_for_call.
+inline void revoke_lent_argument(PyObject* wrapper);
+
 // Helper struct to wrap a Python callable as a C++ callable
 // Uses shared_ptr to PyObject for proper reference counting
 template<typename R, typename... Args>
@@ -913,12 +954,38 @@ struct PythonCallableWrapper {
             throw std::runtime_error("Failed to create argument tuple");
         }
 
+        // The wrappers lent for this call, each held by its own reference so
+        // it can be taken back after the tuple that carried it is gone. One
+        // slot more than there are arguments, so the array is never empty.
+        PyObject* lent_wrappers[sizeof...(Args) + 1] = {};
+        // Runs on every path out of the call, and while the GIL is still
+        // held, which is why it is a call and not a destructor: the error
+        // paths below release the GIL before they throw.
+        auto take_back_lent = [&] {
+            for (PyObject*& wrapper : lent_wrappers) {
+                if (!wrapper) continue;
+                revoke_lent_argument(wrapper);
+                Py_DECREF(wrapper);
+                wrapper = nullptr;
+            }
+        };
+
         // Convert each C++ argument to Python
         std::size_t idx = 0;
         bool conversion_ok = true;
         (([&] {
             if (!conversion_ok) return;
-            PyObject* py_arg = to_python(args);
+            PyObject* py_arg = nullptr;
+            if constexpr (callback_argument_is_lent<Args>()) {
+                bool lent = false;
+                py_arg = lend_for_call(args, lent);
+                if (py_arg && lent) {
+                    Py_INCREF(py_arg);
+                    lent_wrappers[idx] = py_arg;
+                }
+            } else {
+                py_arg = to_python(args);
+            }
             if (!py_arg) {
                 conversion_ok = false;
             } else {
@@ -929,6 +996,7 @@ struct PythonCallableWrapper {
 
         if (!conversion_ok) {
             Py_DECREF(py_args);
+            take_back_lent();
             PyGILState_Release(gstate);
             throw std::runtime_error("Failed to convert callback arguments to Python");
         }
@@ -936,6 +1004,7 @@ struct PythonCallableWrapper {
         // Call the Python callable
         PyObject* result = PyObject_Call(py_callable.get(), py_args, nullptr);
         Py_DECREF(py_args);
+        take_back_lent();
 
         if (!result) {
             // Python exception occurred - convert to C++ exception
@@ -2515,6 +2584,33 @@ struct WrapperView {
     // parent has to outlive every view of it.
     PyObject* parent;
 };
+
+// A wrapper that was lent to a callback and has been taken back has no object
+// and names None as its parent. Nothing else does: an owning wrapper has no
+// parent, and a view or a borrow names the object that keeps it alive.
+inline void revoke_lent_argument(PyObject* wrapper) {
+    auto* view = reinterpret_cast<WrapperView*>(wrapper);
+    view->cpp_object = nullptr;
+    Py_XDECREF(view->parent);
+    Py_INCREF(Py_None);
+    view->parent = Py_None;
+}
+
+// The error for a wrapper with no object behind it. There are two ways to
+// hold one, and telling someone their constructor failed when what they did
+// was keep a callback argument sends them looking in the wrong place.
+inline void set_no_object_error(PyObject* self) {
+    if (reinterpret_cast<WrapperView*>(self)->parent == Py_None) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "this object was an argument to a callback and was only "
+                        "valid until that callback returned; copy what you need "
+                        "out of it inside the callback");
+    } else {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "this object holds no C++ value: its constructor "
+                        "raised, or __init__ was called again and failed");
+    }
+}
 
 // Everything except the common case: a Python subclass, a type registered by
 // another module, or a derived class that needs its address adjusted to a
@@ -4392,9 +4488,7 @@ template<typename T, std::size_t Index>
 PyObject* py_getter(PyObject* self, void* closure) {
     auto* wrapper = reinterpret_cast<PyWrapper<T>*>(self);
     if (!wrapper->cpp_object) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "this object holds no C++ value: its constructor "
-                        "raised, or __init__ was called again and failed");
+        set_no_object_error(self);
         return nullptr;
     }
 
@@ -4453,9 +4547,7 @@ template<typename T, std::size_t Index>
 int py_setter(PyObject* self, PyObject* value, void* closure) {
     auto* wrapper = reinterpret_cast<PyWrapper<T>*>(self);
     if (!wrapper->cpp_object) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "this object holds no C++ value: its constructor "
-                        "raised, or __init__ was called again and failed");
+        set_no_object_error(self);
         return -1;
     }
 
@@ -4514,9 +4606,7 @@ template<typename T, std::size_t VisibleIndex>
 PyObject* py_visible_getter(PyObject* self, void* closure) {
     auto* wrapper = reinterpret_cast<PyWrapper<T>*>(self);
     if (!wrapper->cpp_object) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "this object holds no C++ value: its constructor "
-                        "raised, or __init__ was called again and failed");
+        set_no_object_error(self);
         return nullptr;
     }
 
@@ -4552,9 +4642,7 @@ template<typename T, std::size_t VisibleIndex>
 int py_visible_setter(PyObject* self, PyObject* value, void* closure) {
     auto* wrapper = reinterpret_cast<PyWrapper<T>*>(self);
     if (!wrapper->cpp_object) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "this object holds no C++ value: its constructor "
-                        "raised, or __init__ was called again and failed");
+        set_no_object_error(self);
         return -1;
     }
 
@@ -4677,9 +4765,7 @@ template<typename T, std::size_t Index>
 PyObject* py_method(PyObject* self, PyObject* args) {
     auto* wrapper = reinterpret_cast<PyWrapper<T>*>(self);
     if (!wrapper->cpp_object) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "this object holds no C++ value: its constructor "
-                        "raised, or __init__ was called again and failed");
+        set_no_object_error(self);
         return nullptr;
     }
 
@@ -5641,9 +5727,7 @@ PyObject* py_method_dispatch_impl(PyObject* self, PyObject* const* args,
                                    std::index_sequence<AllIndices...>) {
     auto* wrapper = reinterpret_cast<PyWrapper<T>*>(self);
     if (!wrapper->cpp_object) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "this object holds no C++ value: its constructor "
-                        "raised, or __init__ was called again and failed");
+        set_no_object_error(self);
         return nullptr;
     }
 
@@ -6611,9 +6695,7 @@ PyObject* binary_op_wrapper(PyObject* self, PyObject* other) {
     if (!resolve_wrapper_object<T>(self, self_raw)) {
         PyTypeObject* mine = TypeRegistry<T>::py_type;
         if (mine && PyObject_TypeCheck(self, mine)) {
-            PyErr_SetString(PyExc_RuntimeError,
-                            "this object holds no C++ value: its constructor "
-                            "raised, or __init__ was called again and failed");
+            set_no_object_error(self);
             return nullptr;
         }
         // Not our left operand: let Python try the reflected operation and
@@ -6670,9 +6752,7 @@ template<typename T, std::size_t OpIndex>
 PyObject* unary_op_wrapper(PyObject* self) {
     auto* wrapper = reinterpret_cast<PyWrapper<T>*>(self);
     if (!wrapper->cpp_object) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "this object holds no C++ value: its constructor "
-                        "raised, or __init__ was called again and failed");
+        set_no_object_error(self);
         return nullptr;
     }
     using Ret = typename [:std::meta::return_type_of(OperatorCache<T>::at(OpIndex)):];
@@ -6714,9 +6794,7 @@ template<typename T, std::size_t OpIndex>
 PyObject* call_wrapper(PyObject* self, PyObject* args, PyObject* /*kwds*/) {
     auto* wrapper = reinterpret_cast<PyWrapper<T>*>(self);
     if (!wrapper->cpp_object) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "this object holds no C++ value: its constructor "
-                        "raised, or __init__ was called again and failed");
+        set_no_object_error(self);
         return nullptr;
     }
 
@@ -7678,6 +7756,35 @@ PyObject* borrow_into_python(Class* ptr, PyObject* receiver) {
     wrapper->owns = false;
     Py_INCREF(owner);
     wrapper->parent = owner;
+    return reinterpret_cast<PyObject*>(wrapper);
+}
+
+// The wrapper a reference argument crosses in when C++ calls back into
+// Python. It owns nothing and keeps nothing alive: the object is the
+// caller's, promised only for the call, and PythonCallableWrapper takes the
+// wrapper back when the call returns (revoke_lent_argument).
+//
+// What that does not reach is anything made from the wrapper during the
+// call, a view of one of its members or a borrow from one of its methods.
+// Those hold their own pointers, and keeping one past the callback is the
+// same mistake it would be in C++.
+template<typename Class>
+PyObject* lend_for_call(Class& object, bool& lent) {
+    PyTypeObject* py_type = type_object_for<Class>();
+    if (!py_type) {
+        // No module binds the class, so there is no wrapper type to lend it
+        // through. What this returned before, a snapshot, is still better
+        // than failing the callback.
+        return to_python(object);
+    }
+
+    auto* wrapper = reinterpret_cast<PyWrapper<Class>*>(py_type->tp_alloc(py_type, 0));
+    if (!wrapper) return nullptr;
+
+    wrapper->cpp_object = std::addressof(object);
+    wrapper->owns = false;
+    wrapper->parent = nullptr;
+    lent = true;
     return reinterpret_cast<PyObject*>(wrapper);
 }
 
