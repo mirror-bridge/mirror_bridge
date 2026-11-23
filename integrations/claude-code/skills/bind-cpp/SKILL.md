@@ -14,7 +14,7 @@ you.
 1. **Locate the toolchain.** Try in order:
    - `mirror_bridge version` (pip install: `pip install mirror-bridge`)
    - The `mirror_bridge` MCP tools, if connected (`generate_bindings`, `doctor`, `check_binding_drift`)
-   - `docker run --rm -v "$PWD:/workspace" -w /workspace ghcr.io/franciscothiesen/mirror_bridge:latest bash tools/mirror_bridge ...` (inside a mirror_bridge checkout)
+   - `docker run --rm -v "$PWD:/workspace" -w /workspace ghcr.io/mirror-bridge/mirror_bridge:latest bash tools/mirror_bridge ...` (inside a mirror_bridge checkout)
 
    If none works, suggest `pip install mirror-bridge` (requires Docker) and stop.
 

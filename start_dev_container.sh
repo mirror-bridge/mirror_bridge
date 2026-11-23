@@ -6,7 +6,7 @@ set -e
 
 CONTAINER_NAME="mirror_bridge_dev"
 IMAGE_NAME="mirror_bridge:latest"
-REMOTE_IMAGE="ghcr.io/franciscothiesen/mirror_bridge:latest"
+REMOTE_IMAGE="ghcr.io/mirror-bridge/mirror_bridge:latest"
 
 # Detect architecture
 ARCH=$(uname -m)

@@ -63,7 +63,7 @@ result, including actionable suggestions on failure.
 
 | Environment variable | Effect |
 |---|---|
-| `MIRROR_BRIDGE_IMAGE` | Override the container image (default `ghcr.io/franciscothiesen/mirror_bridge:latest`) |
+| `MIRROR_BRIDGE_IMAGE` | Override the container image (default `ghcr.io/mirror-bridge/mirror_bridge:latest`) |
 
 ## Links
 

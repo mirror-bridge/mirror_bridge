@@ -337,7 +337,7 @@ python3 test_greeter.py
 Run locally with a single command:
 
 ```bash
-docker run -it --rm -v $(pwd):/workspace ghcr.io/franciscothiesen/mirror_bridge:latest
+docker run -it --rm -v $(pwd):/workspace ghcr.io/mirror-bridge/mirror_bridge:latest
 ```
 
 Inside the container:

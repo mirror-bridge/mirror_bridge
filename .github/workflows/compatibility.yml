@@ -14,9 +14,13 @@ on:
   schedule:
     - cron: '23 5 * * 1'
 
+# packages: read is for pulling the job's container image. Naming any
+# permission here drops every one that is not named, and the image is pulled
+# with this token; an image that is not public then fails to pull.
 permissions:
   contents: write
   pull-requests: write
+  packages: read
 
 concurrency:
   group: compatibility
@@ -27,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     # Needs the reflection compiler, plus git and network to fetch the corpus.
     container:
-      image: ghcr.io/franciscothiesen/mirror_bridge:latest
+      image: ghcr.io/mirror-bridge/mirror_bridge:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

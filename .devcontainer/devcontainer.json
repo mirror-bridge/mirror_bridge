@@ -1,6 +1,6 @@
 {
   "name": "Mirror Bridge Development",
-  "image": "ghcr.io/franciscothiesen/mirror_bridge:latest",
+  "image": "ghcr.io/mirror-bridge/mirror_bridge:latest",
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
 
