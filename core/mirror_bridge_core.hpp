@@ -18,6 +18,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1401,6 +1402,104 @@ struct is_container<T, std::void_t<
     decltype(std::declval<T>().size())
 >> : std::bool_constant<!std::is_same_v<T, std::string> &&
                          !std::is_same_v<T, std::string_view>> {};
+
+// ============================================================================
+// C Array Members
+// ============================================================================
+//
+// `float rgba[4]`, `int cells[3][3]`, `char name[64]`. is_convertible_type
+// below says yes to one whenever its element converts, which every backend
+// then has to make true. These are the parts of doing so that do not depend
+// on the language, kept here so three backends cannot each get them slightly
+// differently.
+
+// A fixed char buffer is how a C-style struct holds a string, so it crosses
+// as the language's string and not as a sequence of N integers.
+template<typename T>
+inline constexpr bool is_char_buffer_v =
+    std::is_array_v<T> && std::is_same_v<std::remove_cv_t<std::remove_extent_t<T>>, char>;
+
+// How many bytes of text the buffer holds: up to the first NUL, or all N. A
+// buffer filled to the brim with no terminator is legal C and must not be
+// read past, which is what strlen would do.
+template<std::size_t N>
+std::size_t char_buffer_length(const char (&buffer)[N]) {
+    const void* terminator = std::memchr(buffer, '\0', N);
+    return terminator ? static_cast<std::size_t>(static_cast<const char*>(terminator) - buffer) : N;
+}
+
+// Whether a piece of text can be stored in a char buffer of `capacity` bytes
+// as a C string.
+//
+// It has to fit with its terminator: never a truncation, since a path or a
+// name cut short without a word is the bug this type is known for. And it
+// may not contain a NUL of its own, which would be stored whole and then read
+// back cut short at that byte, the same truncation arrived at another way.
+enum class CharBufferFit { fits, too_long, embedded_nul };
+
+inline CharBufferFit text_fits_char_buffer(const char* bytes, std::size_t size,
+                                           std::size_t capacity) {
+    if (size >= capacity) return CharBufferFit::too_long;
+    if (size > 0 && std::memchr(bytes, '\0', size)) return CharBufferFit::embedded_nul;
+    return CharBufferFit::fits;
+}
+
+// Copies `size` bytes in, `size` being at most N, and zeroes the rest so that
+// nothing of the previous value survives behind the new one.
+template<std::size_t N>
+void copy_into_char_buffer(char (&buffer)[N], const char* bytes, std::size_t size) {
+    if (size > 0) std::memcpy(buffer, bytes, size);
+    std::memset(buffer + size, 0, N - size);
+}
+
+// Stores a converted array into an array member. An array cannot be assigned
+// as a whole, so it goes element by element, through every extent. Arrays
+// only: a caller with a member of any other type assigns it directly, because
+// a bit-field is a member no reference can bind to.
+template<typename Array>
+    requires std::is_array_v<Array>
+void assign_array(Array& member, Array& converted) {
+    for (std::size_t i = 0; i < std::extent_v<Array>; ++i) {
+        if constexpr (std::is_array_v<std::remove_extent_t<Array>>) {
+            assign_array(member[i], converted[i]);
+        } else {
+            member[i] = std::move(converted[i]);
+        }
+    }
+}
+
+// The local a member's new value is converted into before it is stored, so
+// that a value which fails half way leaves the member as it was.
+//
+// An array member can be megabytes (`double samples[2000000]`), and as a
+// plain local it overflowed the stack: the assignment that used to fill such
+// a member in place became a segfault. A large array is therefore built on
+// the heap. Everything else stays an ordinary local, as it always was.
+template<typename Member,
+         bool OnHeap = std::is_array_v<Member> && (sizeof(Member) > 4096)>
+class ConversionLocal {
+    Member value_;
+public:
+    Member& value() { return value_; }
+};
+
+template<typename Member>
+class ConversionLocal<Member, true> {
+    struct Box { Member value; };
+    std::unique_ptr<Box> box_ = std::make_unique_for_overwrite<Box>();
+public:
+    Member& value() { return box_->value; }
+};
+
+// An array whose elements are `const char*` or `std::string_view`. Reading
+// one is fine. Writing one would store pointers into strings the host
+// language owns and may free or reuse the moment the assignment returns, so
+// such a member is readable and not assignable.
+template<typename T>
+inline constexpr bool is_array_of_borrowed_text_v =
+    std::is_array_v<T> &&
+    (std::is_same_v<std::remove_cv_t<std::remove_all_extents_t<T>>, const char*> ||
+     std::is_same_v<std::remove_cv_t<std::remove_all_extents_t<T>>, std::string_view>);
 
 // Checks if a type is convertible by mirror_bridge
 template<typename T>

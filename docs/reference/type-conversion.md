@@ -25,6 +25,7 @@ Mirror Bridge automatically converts types between C++ and target languages. Thi
 | `std::string` | `str` | `string` | `string` |
 | `std::string_view` | `str` | `string` | `string` |
 | `const char*` | `str` | `string` | `string` |
+| `char[N]` data member | `str` | `string` | `string` |
 
 ## Container Types
 
@@ -36,6 +37,7 @@ Mirror Bridge automatically converts types between C++ and target languages. Thi
 | `std::vector<T>` returned from a method (other T) | `list` | `table` (array) | `Array` |
 | `std::vector<T>` read as a **data member** | live view (see below) | `table` (array) | `Array` |
 | `std::array<T, N>` | `list` | `table` (array) | `Array` |
+| `T[N]` data member (not `char`) | `list` | `table` (array) | `Array` |
 | `std::deque<T>` | `list` | `table` (array) | `Array` |
 | `std::list<T>` | `list` | `table` (array) | `Array` |
 
@@ -106,6 +108,38 @@ table or `Array` of any other length is refused, and so is one holding an
 element that does not convert; a refused assignment leaves the member as it
 was. Lua and JavaScript used to accept any length and keep none of it, so a
 member read back as uninitialised memory and a parameter arrived as zeros.
+
+**A C array member is the same thing spelled the old way.** `float rgba[4]`
+reads as a list, table or `Array` of four and takes exactly four; `int
+cells[3][3]` nests one level per extent. As with `std::array`, a refused
+assignment leaves the member as it was. A static array member is a class
+attribute in Python.
+
+**A fixed `char` buffer is the string it holds.** `char name[64]` reads up to
+its first NUL, or to the end of the array if there is none, and never past
+it. Writing takes a string whose UTF-8 form fits with its terminator and
+zeroes the rest of the buffer. A string that does not fit, or that has a NUL
+inside it (which would be stored whole and read back cut short), is refused
+with the reason in the message (`ValueError` in Python, `RangeError` in
+JavaScript, an error in Lua) and is never truncated. A number is not coerced.
+`signed char[N]` and `unsigned char[N]` are arrays of numbers, not strings. C#
+does not carry C arrays yet and says so per member.
+
+In Python, `bytes` are stored as they are: up to all `N` of them, with no
+terminator required. That is the exact form, and it is what pickling and
+`copy.copy` use, so a buffer that was full to the brim or held bytes that are
+not UTF-8 comes back byte for byte. Read as a `str`, such bytes show as
+U+FFFD, because the read also happens inside `repr()`. One consequence in
+every backend: a buffer with no terminator reads as `N` characters, and that
+string cannot be written back as text, since there is no room for the
+terminator.
+
+**An array of `const char*` or `std::string_view` is readable and not
+assignable.** Assigning it would store pointers into strings the host
+language owns and may free as soon as the assignment returns.
+
+**A large array member is fine.** `double samples[2000000]` is converted on
+the heap before it is stored, not on the stack.
 
 **An element can be anything a single value can be.** A `std::vector` of a
 bound class, of `std::optional`, `std::pair` or `std::shared_ptr`, a

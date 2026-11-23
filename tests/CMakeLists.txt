@@ -347,6 +347,14 @@ if(MIRROR_BRIDGE_BUILD_PYTHON)
         )
     endif()
 
+    # C array members: a char buffer is a str, any other array a list
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/array_members)
+        mirror_bridge_python_module(array_members
+            array_members/array_members_binding.cpp
+            INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/array_members
+        )
+    endif()
+
     # const data members bind as read-only attributes
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/const_members)
         mirror_bridge_python_module(const_members
@@ -437,6 +445,15 @@ if(MIRROR_BRIDGE_BUILD_LUA AND LUA_FOUND)
         set_target_properties(type_safety_lua PROPERTIES OUTPUT_NAME type_safety)
     endif()
 
+    # C array members: a char buffer is a string, any other array a table
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/lua/array_members)
+        mirror_bridge_lua_module(array_members_lua
+            lua/array_members/array_members_lua_binding.cpp
+            INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/lua/array_members
+            OUTPUT_DIRECTORY ${LUA_TEST_OUTPUT_DIR}
+        )
+    endif()
+
     # A const member, and one whose type has no default constructor, bind as
     # readable and refuse assignment instead of failing the module
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/lua/const_members)
@@ -519,6 +536,14 @@ if(MIRROR_BRIDGE_BUILD_JS AND NAPI_FOUND)
             target_link_options(foreign_addon PRIVATE -Wl,-undefined,dynamic_lookup)
         endif()
         add_dependencies(type_safety_js foreign_addon)
+    endif()
+
+    # C array members (the JavaScript half of lua/array_members)
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/js/array_members)
+        mirror_bridge_js_module(array_members_js
+            js/array_members/array_members_js_binding.cpp
+            INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/js/array_members
+        )
     endif()
 
     # const and non-assignable members (the JavaScript half of lua/const_members)

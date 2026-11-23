@@ -9,4 +9,5 @@
 MIRROR_BRIDGE_LUA_MODULE(const_members_lua,
     mirror_bridge::lua::bind_class<Sensor>(L, "Sensor");
     mirror_bridge::lua::bind_class<Holder>(L, "Holder");
+    mirror_bridge::lua::bind_class<Packed>(L, "Packed");
 )
