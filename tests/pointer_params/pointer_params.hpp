@@ -91,6 +91,9 @@ public:
     void scale(Vec2* v, double by) { v->x *= by; v->y *= by; }
     double area_of(const Shape* shape) const { return shape->area(); }
 
+    // Hands back its argument, which the world does not own.
+    Vec2* same(Vec2* v) { return v; }
+
     // Defaulted: the header says null is an expected argument.
     int kind_or(const Body* body = nullptr, int fallback = -1) const {
         return body ? body->kind() : fallback;

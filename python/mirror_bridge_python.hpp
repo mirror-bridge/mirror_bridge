@@ -3296,12 +3296,17 @@ template<typename ParamType>
 using py_param_storage_t = typename py_param_storage<ParamType>::type;
 
 // Is this parameter's stored argument the address of an object a Python
-// wrapper holds, as opposed to a value built from Python data? A `const
+// wrapper holds, as opposed to a value built from Python data? True for a
+// reference held by pointer and for a pointer to a bound class. A `const
 // char*` is pointer-typed storage too, and is a value.
 template<typename ParamType>
 consteval bool holds_wrapped_object() {
-    return std::is_pointer_v<py_param_storage_t<ParamType>> &&
-           !std::is_pointer_v<std::remove_cvref_t<ParamType>>;
+    if constexpr (takes_borrowable_pointer<ParamType>()) {
+        return true;
+    } else {
+        return std::is_pointer_v<py_param_storage_t<ParamType>> &&
+               !std::is_pointer_v<std::remove_cvref_t<ParamType>>;
+    }
 }
 
 // A non-const lvalue reference parameter is a promise: the callee writes

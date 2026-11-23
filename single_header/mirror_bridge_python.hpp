@@ -805,6 +805,15 @@ consteval bool is_value_bindable() {
     if constexpr (std::is_void_v<U>) return true;
     if constexpr (std::is_arithmetic_v<U>) return true;
     if constexpr (std::is_enum_v<U>) return true;
+    // A pointer to member, std::nullptr_t and a union are each complete,
+    // default-constructible and copy-assignable, so the general test at the
+    // bottom said yes to all three. No backend has a conversion for any of
+    // them, so the gate admitted the parameter and the conversion then had no
+    // overload: one `void sort_by(int Record::*field)` cost its whole module.
+    if constexpr (std::is_member_pointer_v<U> || std::is_null_pointer_v<U> ||
+                  std::is_union_v<U>) {
+        return false;
+    }
     // Raw pointers only where a conversion actually exists, which means a
     // char pointer carrying a C string and nothing else.
     //
@@ -6882,12 +6891,17 @@ template<typename ParamType>
 using py_param_storage_t = typename py_param_storage<ParamType>::type;
 
 // Is this parameter's stored argument the address of an object a Python
-// wrapper holds, as opposed to a value built from Python data? A `const
+// wrapper holds, as opposed to a value built from Python data? True for a
+// reference held by pointer and for a pointer to a bound class. A `const
 // char*` is pointer-typed storage too, and is a value.
 template<typename ParamType>
 consteval bool holds_wrapped_object() {
-    return std::is_pointer_v<py_param_storage_t<ParamType>> &&
-           !std::is_pointer_v<std::remove_cvref_t<ParamType>>;
+    if constexpr (takes_borrowable_pointer<ParamType>()) {
+        return true;
+    } else {
+        return std::is_pointer_v<py_param_storage_t<ParamType>> &&
+               !std::is_pointer_v<std::remove_cvref_t<ParamType>>;
+    }
 }
 
 // A non-const lvalue reference parameter is a promise: the callee writes

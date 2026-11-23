@@ -145,7 +145,19 @@ assert "skipped method 'World::sum_x' (it takes a pointer beside an element coun
 assert "World::CreateBody" not in declined
 print("  ok")
 
-print("Test 14: the owner frees what it was asked to free...")
+print("Test 14: a method that returns its pointer argument returns that object...")
+# The world does not own `vec`, so a borrow pinned to the world would dangle
+# once `vec` was collected. The caller gets its own object back instead.
+assert world.same(vec) is vec
+fresh = p.Vec2()
+fresh.x = 6.0
+kept = world.same(fresh)
+identity = id(fresh)
+del fresh
+assert id(kept) == identity and kept.x == 6.0
+print("  ok")
+
+print("Test 15: the owner frees what it was asked to free...")
 world.DestroyBody(body)
 assert world.body_count() == 1    # the one made from the Python subclass
 print("  ok")

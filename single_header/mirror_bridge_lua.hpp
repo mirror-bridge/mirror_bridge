@@ -805,6 +805,15 @@ consteval bool is_value_bindable() {
     if constexpr (std::is_void_v<U>) return true;
     if constexpr (std::is_arithmetic_v<U>) return true;
     if constexpr (std::is_enum_v<U>) return true;
+    // A pointer to member, std::nullptr_t and a union are each complete,
+    // default-constructible and copy-assignable, so the general test at the
+    // bottom said yes to all three. No backend has a conversion for any of
+    // them, so the gate admitted the parameter and the conversion then had no
+    // overload: one `void sort_by(int Record::*field)` cost its whole module.
+    if constexpr (std::is_member_pointer_v<U> || std::is_null_pointer_v<U> ||
+                  std::is_union_v<U>) {
+        return false;
+    }
     // Raw pointers only where a conversion actually exists, which means a
     // char pointer carrying a C string and nothing else.
     //
