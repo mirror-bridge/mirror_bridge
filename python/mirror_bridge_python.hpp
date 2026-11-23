@@ -1959,6 +1959,12 @@ consteval bool returns_borrowable_pointer() {
             // whole module. A C API hands out pointers to forward-declared
             // handles constantly (sqlite3_stmt*), and those land here too.
             return false;
+        } else if constexpr (!requires { sizeof(Pointee); }) {
+            // `template<class T> struct Handle;` and a method returning
+            // Handle<int>*: a template that is declared and never defined.
+            // Asked only now, after the arguments were found complete, since
+            // sizeof is the hard error described above when they are not.
+            return false;
         } else if constexpr (!NestedBindable<Pointee>) {
             return false;
         } else {
@@ -2842,6 +2848,11 @@ struct MemberFunctionCache {
                // runtime error but "attempt to use a deleted function" at
                // compile time, which costs the whole module.
                !std::meta::is_deleted(member) &&
+               // Kept in step with core::MemberFunctionCache, which the
+               // parameter helpers index with the positions this cache
+               // assigns: a method filtered from one and not the other
+               // shifts every index after it.
+               !std::meta::is_rvalue_reference_qualified(member) &&
                !std::meta::is_operator_function(member);
     }
 
@@ -4531,22 +4542,6 @@ struct MethodNameCache {
     static constexpr auto names = compute_names();
 };
 
-// `std::vector<Node*> children()`. A container converts element by element
-// and there is no conversion for a raw pointer, so returning one was not a
-// declined method but a compile error for the module. It was always one; a
-// class with a private destructor used to be skipped before the compiler got
-// that far. A container of C strings is left alone: those do convert.
-template<typename C>
-consteval bool is_container_of_raw_pointers() {
-    if constexpr (!Container<C>) {
-        return false;
-    } else {
-        using Element = typename C::value_type;
-        return std::is_pointer_v<Element> &&
-               !std::is_same_v<std::remove_cv_t<std::remove_pointer_t<Element>>, char>;
-    }
-}
-
 // Can this return type cross into Python? Methods whose returns can't
 // (raw pointers, iterators, unconverted exotic types) are skipped the same
 // way param-unbindable methods are — real-world headers are full of them.
@@ -4574,7 +4569,7 @@ consteval bool return_type_convertible() {
             return std::is_same_v<Clean, const char*>;
         } else if constexpr ((!std::is_reference_v<Ret> ||
                               std::meta::has_template_arguments(std::meta::dealias(^^Clean))) &&
-                             mirror_bridge::core::value_cannot_be_destroyed(^^Clean)) {
+                             mirror_bridge::core::value_cannot_be_destroyed<Clean>()) {
             // Returned by value, so the call site would have to destroy it.
             // A reference to V itself is fine and is left alone; a reference
             // to a wrapper of one (`const std::optional<V>&`) is not, because
@@ -4584,7 +4579,10 @@ consteval bool return_type_convertible() {
             // See core::value_cannot_be_destroyed for how a class gets a
             // method like this and why it used to cost the module.
             return false;
-        } else if constexpr (is_container_of_raw_pointers<Clean>()) {
+        } else if constexpr (mirror_bridge::core::carries_nested_raw_pointer<Clean>()) {
+            // std::pair<Node*, bool>, std::optional<Node*>, std::vector<Node*>:
+            // asked before the arms below, which answer for the outer type
+            // alone. See core::carries_raw_pointer.
             return false;
         } else if constexpr (is_std_optional<Clean>::value || is_std_expected<Clean>::value ||
                              is_std_future<Clean>::value || is_std_function<Clean>::value ||
@@ -4612,6 +4610,15 @@ consteval bool method_return_convertible() {
     } else {
         return !names_an_iterator_accessor(MethodNameCache<T>::names[Index]);
     }
+}
+
+// Is this method bound only because its pointer return can be borrowed? The
+// overloads for which this is false are the ones that existed before borrows
+// did, and the dispatcher tries them first.
+template<typename T, std::size_t Index>
+consteval bool method_bound_through_a_pointer() {
+    using Ret = typename [:get_method_return_type<T, Index>():];
+    return !return_type_convertible<Ret>();
 }
 
 // Every out-parameter of a method writes somewhere the caller can see it.
@@ -5210,6 +5217,45 @@ void describe_call_failure(const char* name, Py_ssize_t nargs, PyObject* kwnames
                  name, accepted.c_str());
 }
 
+// One pass over the overloads named like CanonicalIndex, in declaration
+// order: those bound through a pointer when ThroughPointer, the rest when not.
+//
+// The first overload whose arguments convert is the one called. Given
+//
+//   Node* find(double key);
+//   int   find(int key);
+//
+// only find(int) could be bound before a pointer return could cross, so
+// `tree.find(3)` returned an int. Had find(double) simply joined the list in
+// declaration order it would now be tried first, accept the 3, and the same
+// call would return a Node. The dispatcher therefore runs this pass twice,
+// pointer overloads second, so a call that matched an overload before still
+// matches the same one.
+//
+// A function template and not a generic lambda in the dispatcher: GCC 16
+// rejects the fold over AllIndices inside a lambda that has template
+// parameters of its own ("parameter packs not expanded").
+template<typename T, std::size_t CanonicalIndex, bool ThroughPointer, std::size_t... AllIndices>
+PyObject* try_overloads_named(PyWrapper<T>* wrapper, PyObject* const* args,
+                              Py_ssize_t nargs, PyObject* kwnames) {
+    constexpr auto target_name = get_member_function_name<T, CanonicalIndex>();
+    PyObject* result = OVERLOAD_TRY_NEXT;
+
+    ([&] {
+        if (result != OVERLOAD_TRY_NEXT) return;
+
+        constexpr auto this_name = get_member_function_name<T, AllIndices>();
+        if constexpr (std::string_view(this_name) == std::string_view(target_name) &&
+                      method_fully_bindable<T, AllIndices>()) {
+            if constexpr (method_bound_through_a_pointer<T, AllIndices>() == ThroughPointer) {
+                result = try_overload<T, AllIndices>(wrapper, args, nargs, kwnames);
+            }
+        }
+    }(), ...);
+
+    return result;
+}
+
 // Dispatch function that tries all overloads with a given name.
 // CanonicalIndex is the first method with this name; we try ALL methods with
 // matching name. Keyword arguments are supported via each overload's
@@ -5227,17 +5273,13 @@ PyObject* py_method_dispatch_impl(PyObject* self, PyObject* const* args,
     }
 
     constexpr auto target_name = get_member_function_name<T, CanonicalIndex>();
-    PyObject* result = OVERLOAD_TRY_NEXT;
 
-    ([&] {
-        if (result != OVERLOAD_TRY_NEXT) return;
-
-        constexpr auto this_name = get_member_function_name<T, AllIndices>();
-        if constexpr (std::string_view(this_name) == std::string_view(target_name) &&
-                      method_fully_bindable<T, AllIndices>()) {
-            result = try_overload<T, AllIndices>(wrapper, args, nargs, kwnames);
-        }
-    }(), ...);
+    PyObject* result = try_overloads_named<T, CanonicalIndex, false, AllIndices...>(
+        wrapper, args, nargs, kwnames);
+    if (result == OVERLOAD_TRY_NEXT) {
+        result = try_overloads_named<T, CanonicalIndex, true, AllIndices...>(
+            wrapper, args, nargs, kwnames);
+    }
 
     if (result == OVERLOAD_TRY_NEXT) {
         // How many methods actually competed for this call. One is the

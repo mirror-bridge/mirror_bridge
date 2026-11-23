@@ -1,9 +1,14 @@
 #pragma once
 
+#include <array>
+#include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <system_error>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 // The shape of a factory-style C++ API: one object owns the others, hands
@@ -43,6 +48,16 @@ public:
 
     // Written to be chained: node.bump()->bump().
     Node* bump() { ++value_; return this; }
+
+    // A raw pointer nested inside something that otherwise converts. None of
+    // these has a conversion, and each used to fail the module to compile as
+    // soon as a class like this one stopped being skipped.
+    void visit(const std::function<void(Node*)>& f) { f(this); }
+    std::pair<Node*, bool> insert(int) { return {this, true}; }
+    std::optional<Node*> maybe() { return this; }
+    std::tuple<Node*, int> tagged() { return {this, 1}; }
+    std::map<std::string, Node*> by_name() { return {{"self", this}}; }
+    std::array<Node*, 2> both() { return {this, this}; }
 
 private:
     friend class Tree;
@@ -197,6 +212,20 @@ public:
 
     void add(int id, double weight) { items_.push_back(std::make_unique<Item>(id, weight)); }
 
+    // Each pointer overload is declared FIRST and would accept the argument
+    // its sibling was always called with: an int converts to double and to
+    // long, a str to const char*.
+    Item* pick(double key) { return get(static_cast<int>(key)); }
+    int pick(int key) { return key * 10; }
+    Item* flag(long id) { return get(static_cast<int>(id)); }
+    bool flag(bool on) { return !on; }
+    Item* named(const char*) { return nullptr; }
+    std::string named(const std::string& s) { return "str:" + s; }
+
+    // Callable on an rvalue only, which a wrapper's object never is.
+    Item* take() && { return nullptr; }
+    int drain() && { return 0; }
+
     // Neither of these returns anything the registry owns: the result is the
     // caller's argument, or a part of it.
     Item* same(Item& item) { return &item; }
@@ -280,6 +309,72 @@ private:
 
 public:
     ~Registry() { counted_->release(); }
+};
+
+// An intrusive handle. It names Pinned, which nobody outside may destroy,
+// and holds only a pointer to one, so it is an ordinary destructible value.
+class Pinned {
+public:
+    Pinned() = default;
+    int get() const { return 11; }
+    void retain() { ++refs_; }
+    void release() { if (--refs_ == 0) delete this; }
+
+protected:
+    ~Pinned() = default;
+    int refs_ = 0;
+};
+
+template<typename T>
+class Ref {
+public:
+    Ref() = default;
+    explicit Ref(T* p) : p_(p) { if (p_) p_->retain(); }
+    Ref(const Ref& o) : p_(o.p_) { if (p_) p_->retain(); }
+    Ref& operator=(const Ref& o) {
+        if (o.p_) o.p_->retain();
+        if (p_) p_->release();
+        p_ = o.p_;
+        return *this;
+    }
+    ~Ref() { if (p_) p_->release(); }
+    bool valid() const { return p_ != nullptr; }
+    int value() const { return p_->get(); }
+
+private:
+    T* p_ = nullptr;
+};
+
+class Vault {
+public:
+    Ref<Pinned> root() { return root_; }
+    int use(Ref<Pinned> r) { return r.value() + 1; }
+    std::shared_ptr<Pinned> shared() { return nullptr; }
+    int size() const { return 1; }
+
+private:
+    Ref<Pinned> root_{new Pinned};
+};
+
+inline Ref<Pinned> make_pinned() { return Ref<Pinned>(new Pinned); }
+inline int use_pinned(Ref<Pinned> r) { return r.value() + 2; }
+
+// The opaque-handle idiom with a type parameter: declared, never defined.
+template<typename T> struct Opaque2;
+
+struct Opener {
+    Opaque2<int>* open() { return nullptr; }
+    void close(Opaque2<int>*) {}
+    void finish(Opaque2<int> handle);
+    int n() const { return 1; }
+};
+
+// A class whose data member carries raw pointers is not one bind_class can
+// accept, and has to be skipped with a message and not with a compile error.
+struct PointerBag {
+    int n = 0;
+    std::vector<Item*> items;
+    std::map<std::string, Item*> by_name;
 };
 
 // No receiver, so nothing to keep alive: both stay unbound.

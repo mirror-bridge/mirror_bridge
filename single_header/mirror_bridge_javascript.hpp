@@ -222,6 +222,7 @@ consteval std::string synth_name(info tmpl, const std::vector<info>& args) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include <meta>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -573,6 +574,10 @@ struct MemberFunctionCache {
                // runtime error but "attempt to use a deleted function" at
                // compile time, which costs the whole module.
                !std::meta::is_deleted(member) &&
+               // `Node* finish() &&` can only be called on an rvalue, and a
+               // wrapper's object is an lvalue for as long as the wrapper
+               // exists. Calling it is a compile error, not a refusal.
+               !std::meta::is_rvalue_reference_qualified(member) &&
                !std::meta::is_operator_function(member);
     }
 
@@ -887,16 +892,24 @@ consteval bool names_incomplete_class(std::meta::info type) {
         for (std::meta::info arg : std::meta::template_arguments_of(type)) {
             if (std::meta::is_type(arg) && names_incomplete_class(arg)) return true;
         }
-        // The specialization's own completeness is not asked: answering it
-        // means instantiating, which is the thing being avoided.
+        // The specialization's own completeness is not asked here, and must
+        // not be asked with is_complete_type. On clang-p2996 that
+        // metafunction instantiates every member function of the
+        // specialization, not only its definition, so asking it of
+        // Eigen::Matrix<int, -1, -1> runs the static assertions inside
+        // constructors that are only valid for fixed-size vectors and fails
+        // the build (open3d found this). GCC instantiates the class alone.
+        // A template that is declared and never defined is caught by the
+        // callers, which have the type and can ask `requires { sizeof(T); }`.
         return false;
     }
     return !std::meta::is_complete_type(type);
 }
 
-// Would holding a value of `type` need a destructor this code may not call?
+// Would holding a value of T need a destructor this code may not call?
 // True for a class whose destructor is private, protected or deleted, and
-// for anything that holds one by value: optional<V>, vector<V>, pair<V, int>.
+// for a standard wrapper that holds one by value: optional<V>, vector<V>,
+// pair<V, int>, unique_ptr<V>.
 //
 // Such a class binds as one that is only ever borrowed, and a borrow never
 // destroys anything. But its own methods can still name it by value --
@@ -906,18 +919,113 @@ consteval bool names_incomplete_class(std::meta::info type) {
 // argument means destroying a V, which does not compile, and one such method
 // used to cost the whole module once the class stopped being skipped.
 //
-// unique_ptr<V> and shared_ptr<V> are caught by the same walk. Their own
-// destructors exist, so the trait says yes, and instantiating them says no.
-consteval bool value_cannot_be_destroyed(std::meta::info type) {
-    type = std::meta::remove_cv(std::meta::dealias(type));
-    if (!std::meta::is_class_type(type)) return false;
-    if (std::meta::has_template_arguments(type)) {
-        for (std::meta::info arg : std::meta::template_arguments_of(type)) {
-            if (std::meta::is_type(arg) && value_cannot_be_destroyed(arg)) return true;
-        }
+// The template arguments are walked for the standard library's templates
+// only, because that is where the trait cannot be asked: std::optional<V>
+// and std::vector<V> assert when instantiated, and std::unique_ptr<V> says
+// it is destructible and then is not. A template of the user's own is asked
+// directly. An intrusive handle `Ref<V>` names V, holds a V*, and is as
+// destructible as any other class; treating it like optional<V> took away
+// every method that passed or returned one. std::shared_ptr and
+// std::weak_ptr are the same shape: the deleter is fixed where the object is
+// created, so destroying the pointer never needs V's destructor here.
+//
+// The walk matches on the shape of the type and instantiates nothing, which
+// is why it is a set of partial specializations and not a loop over
+// template_arguments_of: what follows it needs `requires { sizeof(T); }`,
+// and that can only be asked of a type, not of a reflection of one.
+template<typename T>
+consteval bool value_cannot_be_destroyed();
+
+template<typename T>
+struct holds_undestroyable_by_value : std::false_type {};
+
+template<template<typename...> class Family, typename... Args>
+struct holds_undestroyable_by_value<Family<Args...>>
+    : std::bool_constant<is_declared_in_std(^^Family<Args...>) &&
+                         (value_cannot_be_destroyed<Args>() || ...)> {};
+
+template<typename T, std::size_t N>
+struct holds_undestroyable_by_value<std::array<T, N>>
+    : std::bool_constant<value_cannot_be_destroyed<T>()> {};
+
+template<typename T>
+struct holds_undestroyable_by_value<std::shared_ptr<T>> : std::false_type {};
+
+template<typename T>
+struct holds_undestroyable_by_value<std::weak_ptr<T>> : std::false_type {};
+
+template<typename T>
+consteval bool value_cannot_be_destroyed() {
+    using U = std::remove_cv_t<T>;
+    if constexpr (!std::is_class_v<U>) {
+        return false;
+    } else if constexpr (holds_undestroyable_by_value<U>::value) {
+        return true;
+    } else if constexpr (names_incomplete_class(^^U)) {
+        return false;
+    } else if constexpr (!requires { sizeof(U); }) {
+        // A specialization of a template that is declared and never defined.
+        // It cannot be held at all, which the callers' own completeness
+        // checks say; it is not this question, and asking the trait below
+        // of it is a hard error.
+        return false;
+    } else {
+        return !std::is_destructible_v<U>;
     }
-    if (names_incomplete_class(type)) return false;
-    return !std::meta::is_destructible_type(type);
+}
+
+// Does T carry a raw pointer inside a standard-library template:
+// std::vector<Node*>, std::pair<Node*, bool>, std::map<std::string, Node*>,
+// std::optional<Node*>, std::function<void(Node*)>?
+//
+// Each of those converts element by element, and no backend converts a raw
+// pointer element, so the conversion has no overload to call. The gates
+// answered for the outer type alone ("an optional converts"), which made any
+// one such return, parameter or data member a compile error for the whole
+// module. A `const char*` element is a string and does convert.
+//
+// Matched structurally and never instantiated, so it is safe to ask of a
+// type that could not be completed. Only std templates are followed: a class
+// template of the user's own, `Grid<Cell*>`, crosses as a wrapped object and
+// converts nothing it is made of.
+template<typename T>
+consteval bool carries_raw_pointer();
+
+template<typename T>
+struct carries_raw_pointer_in : std::false_type {};
+
+template<typename T>
+struct carries_raw_pointer_in<T*> : std::bool_constant<!std::is_same_v<T, const char>> {};
+
+template<template<typename...> class Family, typename... Args>
+struct carries_raw_pointer_in<Family<Args...>>
+    : std::bool_constant<is_declared_in_std(^^Family<Args...>) &&
+                         (carries_raw_pointer<Args>() || ...)> {};
+
+// std::array's size is not a type, so the pattern above does not see it.
+template<typename T, std::size_t N>
+struct carries_raw_pointer_in<std::array<T, N>> : std::bool_constant<carries_raw_pointer<T>()> {};
+
+// The signature inside std::function<R(Args...)>.
+template<typename R, typename... Args>
+struct carries_raw_pointer_in<R(Args...)>
+    : std::bool_constant<carries_raw_pointer<R>() || (carries_raw_pointer<Args>() || ...)> {};
+
+template<typename R, typename... Args>
+struct carries_raw_pointer_in<R(Args...) noexcept>
+    : std::bool_constant<carries_raw_pointer<R>() || (carries_raw_pointer<Args>() || ...)> {};
+
+template<typename T>
+consteval bool carries_raw_pointer() {
+    return carries_raw_pointer_in<std::remove_cvref_t<T>>::value;
+}
+
+// The same question for a type that is not itself the pointer: `Node*` as a
+// whole parameter or return has rules of its own, and this is about what is
+// nested inside something else.
+template<typename T>
+consteval bool carries_nested_raw_pointer() {
+    return !std::is_pointer_v<std::remove_cvref_t<T>> && carries_raw_pointer<T>();
 }
 
 // Can this parameter type participate in a bound method signature at all?
@@ -925,6 +1033,7 @@ consteval bool value_cannot_be_destroyed(std::meta::info type) {
 template<typename T>
 consteval bool is_param_bindable() {
     using U = std::remove_cvref_t<T>;
+    if constexpr (carries_nested_raw_pointer<U>()) return false;
     // A smart pointer to an opaque handle -- sqlite3_stmt, FILE, SSL_CTX, the
     // shape every C library hands out -- is itself a complete class whose
     // pointee is only forward declared. The converter for it asks
@@ -941,7 +1050,7 @@ consteval bool is_param_bindable() {
     // build and then destroy. By lvalue reference it is the caller's own
     // object, borrowed for the call, and that is fine for any class.
     if constexpr (!std::is_lvalue_reference_v<T>) {
-        if (value_cannot_be_destroyed(^^U)) return false;
+        if constexpr (value_cannot_be_destroyed<U>()) return false;
     }
     if constexpr (is_value_bindable<U>()) return true;
     // Complete, non-pointer class type → use pointer-holder
@@ -1495,7 +1604,11 @@ template<typename T>
 consteval bool is_convertible_type() {
     using U = std::remove_cvref_t<T>;
 
-    if constexpr (std::is_arithmetic_v<U>) {
+    if constexpr (carries_nested_raw_pointer<U>()) {
+        // Asked first: the arms below answer for the outer type alone, and
+        // "a container converts" is not true of std::vector<Node*>.
+        return false;
+    } else if constexpr (std::is_arithmetic_v<U>) {
         return true;
     } else if constexpr (std::is_same_v<U, std::string> ||
                          std::is_same_v<U, std::string_view> ||

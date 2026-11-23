@@ -301,7 +301,9 @@ and refuses the rest, almost all of it by name at build time.
 | `T*` | a static method, a free function or an operator | Not bound. There is no receiver whose lifetime could stand in for the object's |
 | `T*` | a method named `begin`, `end`, `data` or one of their `c`/`r` forms | Not bound. That is a position, not an object: `end()` is one past the last element |
 | `const T*` | anywhere | Not bound. A wrapper is a mutable handle, so a borrow would let Python write through a pointer C++ declared read-only |
-| `T**`, `int*`, a pointer to a forward-declared class | anywhere | Not bound |
+| `T**`, `int*`, a pointer to a forward-declared class or to a class template that is declared and never defined | anywhere | Not bound |
+| a raw pointer inside a standard template: `std::vector<T*>`, `std::pair<T*, bool>`, `std::optional<T*>`, `std::map<K, T*>`, `std::function<void(T*)>` | a return, a parameter or a data member | Not bound. A class with such a data member is skipped |
+| `T*` | a method that is `&&`-qualified | Not bound, like any `&&`-qualified method: a wrapper's object is never an rvalue |
 
 ```cpp
 class Tree {
@@ -343,7 +345,18 @@ binds as a class that is only ever borrowed. Its methods work. Constructing
 one from Python raises `TypeError`, including when it has a public constructor
 or a trampoline, because nothing could free the result. A method of such a
 class that returns or takes the class *by value* is not bound: receiving the
-value would mean destroying it.
+value would mean destroying it. The same goes for a standard wrapper that
+holds one by value (`std::optional<V>`, `std::vector<V>`,
+`std::unique_ptr<V>`). A template of your own that only points at one, such as
+an intrusive `Ref<V>`, is an ordinary value and is unaffected, as are
+`std::shared_ptr<V>` and `std::weak_ptr<V>`.
+
+**Overloads.** Where a name is overloaded and only some overloads return a
+pointer, the ones that do not are tried first, in declaration order, and the
+pointer-returning ones after them. Those are the overloads that were bound
+before pointer returns were, so no existing call changes its target: with
+`Node* find(double)` declared ahead of `int find(int)`, `tree.find(3)` still
+returns an `int` and `tree.find(3.0)` returns the `Node`.
 
 **`const`/non-`const` pairs.** A class that declares both
 `const Item* at(int) const` and `Item* at(int)` has one Python method `at`,

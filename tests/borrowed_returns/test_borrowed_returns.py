@@ -299,4 +299,43 @@ gc.collect()
 assert b.Tally.freed() == 2, "the Crate and its two Items were never released"
 print("  ✓ the argument is returned as itself, and outlives a borrow of its member")
 
+print("Test 20: an overload that was bound before keeps its calls...")
+# In each pair the pointer-returning overload is declared first and would
+# accept the same argument. Only the second could be bound before a pointer
+# return could cross, so these calls must still reach it.
+reg = b.Registry()
+reg.add(3, 1.0)
+assert reg.pick(3) == 30, reg.pick(3)
+assert reg.flag(True) is False
+assert reg.named("x") == "str:x"
+# The pointer overload is still there for a call only it can take.
+assert type(reg.pick(3.0)) is b.Item
+print("  ✓ pick(int), flag(bool) and named(str) are the overloads they always were")
+
+print("Test 21: a handle that names an unfreeable class is still an ordinary value...")
+# Ref<Pinned> holds a Pinned* and is destructible. Treating it like
+# optional<Pinned> took away every method that passed or returned one.
+vault = b.Vault()
+assert vault.root().value() == 11
+assert vault.use(vault.root()) == 12
+assert b.use_pinned(b.make_pinned()) == 13
+assert hasattr(b.Vault, "shared"), "a shared_ptr to an unfreeable class is still a shared_ptr"
+print("  ✓ methods and functions passing Ref<Pinned> are bound and work")
+
+print("Test 22: shapes that cannot be bound cost only themselves...")
+# A template declared and never defined, by pointer and by value.
+opener = b.Opener()
+assert opener.n() == 1
+for name in ("open", "close", "finish"):
+    assert not hasattr(b.Opener, name), f"Opener.{name} names an undefined template"
+# A raw pointer nested in a pair, optional, tuple, map, array or callback.
+for name in ("visit", "insert", "maybe", "tagged", "by_name", "both"):
+    assert not hasattr(b.Node, name), f"Node.{name} has no conversion and was bound"
+# A method that can only be called on an rvalue.
+for name in ("take", "drain"):
+    assert not hasattr(b.Registry, name), f"Registry.{name} is &&-qualified"
+# A class with raw pointers in its data members.
+assert not hasattr(b, "PointerBag")
+print("  ✓ each is declined, and its class and module are intact")
+
 print("\nAll borrowed-return tests passed.")

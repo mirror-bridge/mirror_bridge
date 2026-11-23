@@ -22,6 +22,12 @@ MIRROR_BRIDGE_MODULE(borrowed_returns,
     mirror_bridge::bind_class<borrowed::Sealed>(m, "Sealed");
     mirror_bridge::bind_class<borrowed::Registry>(m, "Registry");
     mirror_bridge::bind_class<borrowed::Listener, Trampoline_Listener>(m, "Listener");
+    mirror_bridge::bind_class<borrowed::Ref<borrowed::Pinned>>(m, "PinnedRef");
+    mirror_bridge::bind_class<borrowed::Vault>(m, "Vault");
+    mirror_bridge::bind_class<borrowed::Opener>(m, "Opener");
+    mirror_bridge::bind_class_when_bindable<borrowed::PointerBag>(m, "PointerBag");
+    mirror_bridge::bind_function_when_bindable<&borrowed::make_pinned>(m, "make_pinned");
+    mirror_bridge::bind_function_when_bindable<&borrowed::use_pinned>(m, "use_pinned");
     mirror_bridge::bind_function_when_bindable<&borrowed::global_item>(m, "global_item");
     mirror_bridge::bind_function_when_bindable<&borrowed::global_default>(m, "global_default");
 )
