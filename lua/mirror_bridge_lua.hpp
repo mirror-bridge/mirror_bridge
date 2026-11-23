@@ -1938,12 +1938,40 @@ from_lua(lua_State* L, int idx, T& out) {
 // ============================================================================
 
 template<Bindable T>
+void bind_class_impl(lua_State* L, const char* name);
+
+// A member with no conversion is left out of the class. Someone who names a
+// class by hand and would get fewer fields than the struct has should hear
+// that from the compiler, so here it is an error. bind_class_when_bindable,
+// which is what `mirror_bridge generate` emits, leaves the member out and
+// binds the rest.
+template<Bindable T>
 void bind_class(lua_State* L, const char* name) {
     static_assert(core::validate_bindable_members<T>(),
-        "bind_class<T>: T contains members with types that mirror_bridge cannot convert. "
-        "Add a custom type converter for them. [[=exclude{}]] will not help here: "
-        "this backend binds every named member and does not read annotations yet.");
+        "bind_class<T>: T has a data member whose type mirror_bridge cannot convert. "
+        "Add a custom type converter for it, or bind the class with "
+        "bind_class_when_bindable<T>, which leaves such a member out and binds the rest. "
+        "[[=exclude{}]] will not help here: this backend does not read annotations yet.");
+    bind_class_impl<T>(L, name);
+}
 
+// What `mirror_bridge generate` emits. A class nothing can be read from is
+// skipped by name, and a member with no conversion costs only itself, where
+// either used to be a compile error for every class in the module.
+template<typename T>
+void bind_class_when_bindable(lua_State* L, const char* name) {
+    if constexpr (!Bindable<std::remove_cvref_t<T>>) {
+        std::fprintf(stderr,
+            "mirror_bridge: skipped '%s' (not bindable: no reflectable "
+            "members/methods)\n", name);
+    } else {
+        core::report_declined_data_members<T>(name);
+        bind_class_impl<T>(L, name);
+    }
+}
+
+template<Bindable T>
+void bind_class_impl(lua_State* L, const char* name) {
     static_assert(core::type_key_is_distinctive<T>(),
         "bind_class<T>: this compiler cannot spell T distinctly, so T would share a "
         "metatable with another specialisation and the boundary check could not tell "
