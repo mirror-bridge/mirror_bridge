@@ -110,7 +110,16 @@ else:
     except TypeError:
         print("  ✓ total raises TypeError rather than failing the build")
 
-print("Test 9: a declined method says so, when asked...")
+print("Test 9: a pointer-to-member, nullptr_t or union parameter costs only its method...")
+# Each of these passed the value gate and then had no conversion, so one such
+# method failed the whole module to compile.
+sorter = d.Sorter()
+assert sorter.usable(3) == 3
+for name in ("by_field", "by_getter", "reset", "store"):
+    assert not hasattr(d.Sorter, name), "Sorter.%s has no conversion and was bound" % name
+print("  ✓ four methods declined, the class and its other method bound")
+
+print("Test 10: a declined method says so, when asked...")
 # A declined class and a declined free function were each refused by name on
 # stderr. A declined method was refused in silence: not on stderr, not in
 # --json, not in the stub, and dir() just does not list it, so a caller could

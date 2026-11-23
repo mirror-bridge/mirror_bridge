@@ -108,4 +108,21 @@ struct SpanTaker {
     }
 };
 
+// Three parameter types that are complete, default-constructible and
+// copy-assignable, which is everything the value gate asked, and that nothing
+// converts: a pointer to member, std::nullptr_t and a union.
+union Number {
+    int whole;
+    float real;
+};
+
+struct Sorter {
+    int calls = 0;
+    int usable(int n) const { return n + calls; }
+    void by_field(int Plain::*field) { (void)field; ++calls; }
+    void by_getter(int (Plain::*getter)() const) { (void)getter; ++calls; }
+    void reset(std::nullptr_t) { calls = 0; }
+    void store(Number n) { (void)n; ++calls; }
+};
+
 }  // namespace decl
