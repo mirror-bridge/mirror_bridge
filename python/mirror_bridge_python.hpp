@@ -4766,38 +4766,13 @@ consteval bool return_type_convertible() {
         return true;
     } else {
         using Clean = std::remove_cvref_t<Ret>;
-        if constexpr (std::is_pointer_v<Clean>) {
-            // A returned pointer says nothing about who owns the thing, which
-            // is why they are refused -- with one exception. `const char*` is
-            // the one pointer whose convention is settled: the caller borrows
-            // it and does not free it. to_python copies it into a Python str
-            // before anything else can run, and answers None for the null a C
-            // API uses to mean absent, so nothing of it outlives the call.
-            //
-            // The parameter gate has drawn this line since Clipper2's
-            // exception constructor needed it. The return gate had not, and it
-            // cost more: 1,282 functions in the compatibility corpus are
-            // declared to return `const char*`, among them every `what()`,
-            // SQLiteCpp's 83 (getColumnName, getErrorMsg) and tinyxml2's
-            // Attribute(). `char*` stays refused: by convention that one is
-            // the caller's to free, and copying it would leak.
-            return std::is_same_v<Clean, const char*>;
-        } else if constexpr ((!std::is_reference_v<Ret> ||
-                              std::meta::has_template_arguments(std::meta::dealias(^^Clean))) &&
-                             mirror_bridge::core::value_cannot_be_destroyed<Clean>()) {
-            // Returned by value, so the call site would have to destroy it.
-            // A reference to V itself is fine and is left alone; a reference
-            // to a wrapper of one (`const std::optional<V>&`) is not, because
-            // converting it still has to instantiate the wrapper.
-            // Asked before the container test below, which instantiates the
-            // type: std::optional<V> static_asserts on a V it cannot destroy.
-            // See core::value_cannot_be_destroyed for how a class gets a
-            // method like this and why it used to cost the module.
-            return false;
-        } else if constexpr (mirror_bridge::core::carries_nested_raw_pointer<Clean>()) {
-            // std::pair<Node*, bool>, std::optional<Node*>, std::vector<Node*>:
-            // asked before the arms below, which answer for the outer type
-            // alone. See core::carries_raw_pointer.
+        if constexpr (mirror_bridge::core::return_is_refused_everywhere<Ret>()) {
+            // A pointer other than `const char*`, a value this code could not
+            // destroy, or a raw pointer nested in a standard template. The
+            // rule and its history are in core, which Lua and JavaScript ask
+            // too. `const char*` cost the most before it was admitted: 1,282
+            // functions in the compatibility corpus return one, among them
+            // every `what()`, SQLiteCpp's 83 and tinyxml2's Attribute().
             return false;
         } else if constexpr (is_std_optional<Clean>::value || is_std_expected<Clean>::value ||
                              is_std_future<Clean>::value || is_std_function<Clean>::value ||
