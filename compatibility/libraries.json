@@ -54,9 +54,10 @@
         "XMLElement",
         "XMLDocument.RootElement",
         "XMLElement.FirstChildElement",
-        "XMLElement.Attribute"
+        "XMLElement.Attribute",
+        "XMLElement.InsertEndChild"
       ],
-      "note": "A document can be parsed and walked: RootElement, FirstChildElement and NextSiblingElement hand back borrowed elements. It cannot yet be built, because InsertEndChild takes a pointer parameter and those are not bound."
+      "note": "A document can be parsed, walked, built and printed: RootElement and FirstChildElement hand back borrowed elements, and NewElement, InsertEndChild, DeleteChild and Print(XMLPrinter*) take them. XMLAttribute is in the module and cannot be obtained, since every accessor for it returns a const pointer."
     },
     {
       "name": "pugixml",
@@ -295,14 +296,16 @@
       "shape": "oo",
       "build": "for f in @CHECKOUT@/src/*/*.cpp; do clang++ -std=c++17 -stdlib=libc++ -O1 -fPIC -I@CHECKOUT@/include -I@CHECKOUT@/src -c \"$f\" -o \"@BUILD@/$(basename \"$f\" .cpp).o\" || exit 1; done",
       "link_args": "@BUILD@/*.o",
-      "expect": "partial",
+      "expect": "bind",
       "must_export": [
         "b2World",
         "b2Body",
         "b2World.CreateBody",
-        "b2Body.CreateFixture"
+        "b2Body.CreateFixture",
+        "b2World.Step",
+        "b2Body.GetPosition"
       ],
-      "note": "b2World and b2Body both bind, and a body is still unobtainable: CreateBody and CreateFixture take pointer parameters, which are not bound, so a world can be created and nothing can be put in it."
+      "note": "A world, a static ground body and a dynamic box simulate: CreateBody(const b2BodyDef*) and CreateFixture(const b2Shape*, float) take wrapped objects, and the box falls and comes to rest. b2FixtureDef and b2JointDef are not bound, because each has a raw pointer data member, so a fixture is configured through its setters and joints cannot be created yet."
     },
     {
       "name": "simdjson",

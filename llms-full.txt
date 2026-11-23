@@ -212,6 +212,7 @@ See [the CLI reference](docs/reference/cli.md#csharp-output).
 | **Method Overloading** | ✅ | ⚠️ | ⚠️ | ✅ |
 | **Smart Pointers** | ⚠️ | ⚠️ | ⚠️ | ❌ |
 | **Borrowed pointer returns** | ✅ | ❌ | ❌ | ✅ |
+| **Pointer parameters** | ✅ | ❌ | ❌ | ❌ |
 | **Exception Handling** | ✅ | ✅ | ✅ | ✅ |
 | **Cross-Module Types** | ✅ | ❌ | ❌ | ❌ |
 | **Zero-Copy Buffers** | ✅ | ❌ | ❌ | ❌ |
@@ -302,10 +303,18 @@ library's own object, not a copy. The wrapper frees nothing and keeps the
 owner alive, so `doc.RootElement().FirstChildElement("body")` works and stays
 valid for as long as you hold it; a null pointer is `None`. A class with a
 private destructor, which is how a factory-style library says "we free these",
-binds as a class you can only be handed. `const T*` returns and pointer
-*parameters* are not bound yet, and what a borrow has to assume about lifetime
-is spelled out in
+binds as a class you can only be handed. `const T*` returns are not bound
+yet, and what a borrow has to assume about lifetime is spelled out in
 [the type reference](docs/reference/type-conversion.md#pointer-returns-python).
+
+✅ **Pointer parameters** (Python): a method taking `T*` or `const T*` takes
+the object a wrapper holds, so `world.CreateBody(definition)`,
+`world.DestroyBody(body)` and `node.InsertEndChild(child)` work. `None` is
+passed as a null pointer only where the header gives the parameter a default
+argument and is a `TypeError` everywhere else, and a pointer declared beside
+an element count is treated as an array and not bound. Constructors and free
+functions do not take pointers yet. Details in
+[the type reference](docs/reference/type-conversion.md#pointer-parameters-python).
 
 ✅ **Constructors**: Lua's `Cls(...)`, `Cls:new(...)` and `Cls.new(...)` and
 JavaScript's `new Cls(...)` call the constructor whose parameters the
@@ -5305,13 +5314,88 @@ list the `const` half as declined.
   caller should `delete` is bound as a borrow, and the object leaks. Return a
   `std::unique_ptr` instead.
 
-Not covered yet: a pointer *parameter* (`world.DestroyBody(body)`,
-`node.InsertEndChild(child)`), any `const T*` return, and returning the
-most-derived type for a pointer to a polymorphic base (an `XMLNode*` that is
-really an `XMLElement` arrives as an `XMLNode`; the library's own
-`ToElement()` narrows it). Lua and JavaScript still refuse pointer returns; C#
-borrows them under its own rules, described in
+Not covered yet: any `const T*` return, and returning the most-derived type
+for a pointer to a polymorphic base (an `XMLNode*` that is really an
+`XMLElement` arrives as an `XMLNode`; the library's own `ToElement()` narrows
+it). Lua and JavaScript still refuse pointer returns; C# borrows them under
+its own rules, described in
 [the C# design notes](../internals/csharp-design.md#a-class-c-cannot-own-binds-borrow-only).
+
+### Pointer parameters (Python)
+
+`world.DestroyBody(body)`, `node.InsertEndChild(child)`,
+`world.CreateBody(definition)`: a method that takes a pointer to a class takes
+the object a wrapper already holds. It is passed by address, exactly as a
+`T&` parameter is, so nothing is copied, a write through a `T*` reaches the
+Python object, and a derived object is adjusted to the base the callee asked
+for.
+
+| Parameter | Of | Takes |
+|-----------|----|-------|
+| `T*` or `const T*`, `T` a class that can be bound | an instance or static method | An object of `T` or of a class derived from it. `None` only if the parameter has a default argument |
+| the same, declared beside an integer named like a count (`points, count`; `numVertices, vertices`) or beside an unnamed integer | an instance or static method | Not bound. That is an array, and a wrapper holds one object |
+| `T*` or `const T*` | a constructor, a free function or an operator | Not bound |
+| `T*&`, `T**`, `int*`, a pointer to a standard-library class or to a forward-declared class | anywhere | Not bound |
+
+```cpp
+class World {
+public:
+    Body* CreateBody(const BodyDef* def);
+    void DestroyBody(Body* body);
+    int kind_or(const Body* body = nullptr, int fallback = -1) const;
+    void Set(const Vec2* points, int count);   // not bound: an array
+};
+```
+
+```python
+world = World()
+body = world.CreateBody(BodyDef())
+world.kind_or(body)
+world.kind_or(None)          # the header defaults it, so None is nullptr
+world.kind_or()              # the same call
+world.CreateBody(None)       # TypeError: no default, so no None
+world.DestroyBody(body)      # `body` now dangles, as it would in C++
+```
+
+**`None`.** A null pointer is passed only where the header says one is
+expected, and the one place a signature says that is a default argument. Every
+other pointer parameter refuses `None` with a `TypeError`. Libraries routinely
+dereference a pointer parameter without checking it, and an exception is a
+better answer than a crash inside the library. The stub agrees:
+`body: Body | None = ...` for the defaulted parameter and `def_: BodyDef` for
+the other.
+
+**Arrays.** `Set(const Vec2* points, int count)` reads `count` objects, and
+binding it would let `shape.Set(vec, 8)` read seven objects past one. The
+types do not tell that apart from `addWidget(Widget* w, int stretch)`, which
+takes one object; the parameter names do. A pointer is taken to be an array
+when the parameter before or after it is an integer whose name contains
+`count`, `size`, `len`, `num` or `capacity`, or is `n`, `nb`, `cnt` or `sz`,
+or is an integer with no name at all. `generate` lists such a method as
+declined and says why.
+
+**Overloads.** Where a class declares both `f(const T&)` and `f(T*)`, a call
+with an object goes to the reference overload, whichever is declared first.
+That is the overload such a call reached before pointer parameters were
+bound, so no existing call changes its target.
+
+**What a pointer parameter assumes, and no signature can tell it**, the same
+as for a `T&` parameter:
+
+- *The callee does not keep the pointer.* `world.SetContactListener(listener)`
+  stores it. Keep the Python object alive yourself for as long as the world
+  uses it, as you would in C++; nothing does that for you yet.
+- *The callee does not free it, unless the library owns it already.*
+  `world.DestroyBody(body)` is fine, since `body` is a borrow the world owns.
+  Passing an object Python constructed to a method that deletes its argument
+  frees it twice.
+- *The pointer is to one object.* An array passed with no count in the
+  signature cannot be told from a single object.
+
+Constructors are left out because a constructor that takes a pointer nearly
+always keeps it, and the new object cannot yet hold its argument alive. A
+class whose only useful constructor takes a pointer still binds, with that
+constructor missing.
 
 ## Const Correctness
 
@@ -5738,7 +5822,8 @@ cannot cross is something you hear about from `generate` rather than from an
 
 | Shape | Status | What to write instead |
 |-------|--------|-----------------------|
-| `T*` as a parameter | Not bound | A pointer says nothing about who owns the thing. Take `T&`, which aliases the Python object |
+| `T*` as a parameter of a method, `T` a bound class | Python: bound, takes the wrapper's own object. Lua, JavaScript: not bound | Nothing. See [Pointer parameters](#pointer-parameters-python) for `None`, arrays and what it assumes |
+| `T*` as a parameter of a constructor or a free function | Not bound | Take `T&`, which aliases the Python object |
 | `T*` returned by an instance method, `T` a bound class | Python: bound, a borrow that keeps the owner alive. Lua, JavaScript: not bound | Nothing. See [Pointer returns](#pointer-returns-python) for what it assumes about lifetime |
 | `const T*` as a return | Not bound | Return `const T&`, which crosses as a copy, or add a non-`const` overload |
 | `T*` returned by a static method or free function | Not bound | There is no owner to keep alive. Return by value or by `unique_ptr`, or make it a method of the owner |
@@ -6313,7 +6398,7 @@ other value is refused rather than becoming a null pointer.
 
 | Limitation | Status |
 |------------|--------|
-| Raw pointers (T*) | Python: a `T*` an instance method returns is a borrow that keeps its owner alive. `const T*`, pointer parameters, and pointer returns in Lua and JavaScript are not supported |
+| Raw pointers (T*) | Python: a `T*` an instance method returns is a borrow that keeps its owner alive, and a `T*` or `const T*` method parameter takes a wrapped object. `const T*` returns, pointer parameters of constructors and free functions, pointer data members, and pointers in Lua and JavaScript are not supported |
 | `std::optional` | Supported |
 | `std::variant` | Supported |
 | `std::tuple`/`std::pair` | Supported |
@@ -6960,6 +7045,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A method that takes a pointer takes the object a wrapper already holds, which is what box2d needed to simulate anything.** A pointer-to-class parameter was refused outright ("a pointer says nothing about who owns the thing"), so after `b2Body` and `XMLElement` could be bound, `b2World::CreateBody(const b2BodyDef*)` and `XMLNode::InsertEndChild(XMLNode*)` still could not be called: a world could be made and nothing put in it. A `T*` or `const T*` parameter of an **instance or static method** is now passed the address the wrapper holds, the way a `T&` parameter always has been, with the same base adjustment for a derived argument. A pointer differs from a reference in two ways, and each is answered from the declaration. It can be null: `None` becomes `nullptr` only for a parameter the header declares with a default argument, the one place a signature says the callee expects no object, and is a `TypeError` everywhere else, because the usual alternative is a null dereference inside the library (tinyxml2's `InsertEndChild` asserts and then dereferences). The stub says the same, `Body | None = ...` against plain `BodyDef`. And it can be an array: `b2PolygonShape::Set(const b2Vec2* points, int32 count)` reads `count` objects where a wrapper holds one, so a pointer beside an integer named like a count (or an unnamed integer) is declined, with that reason in the report. The types cannot tell that from `addWidget(Widget*, int stretch)`; the parameter names can, and reflection has them. An overload taking a pointer is tried after every overload that does not, so a class declaring `f(T*)` before `f(const T&)` keeps sending its calls to the function they reached before. Measured on the corpus: box2d moves from "binds, missing core API" to binding, and a world with a ground body and a falling box steps to rest from Python; tinyxml2's `XMLElement` goes from 49 methods to 58 and a document can be built, edited and printed, where before it could only be parsed and walked. What is assumed is what a `T&` parameter already assumed: the callee neither keeps nor frees what it is handed. Not bound: pointer parameters of constructors, which keep their arguments more often than not and need the new object to hold them alive; of free functions and operators; and `T*&`, `T**` and pointers to non-class types. `b2FixtureDef` and `b2JointDef` stay out of the module for a separate reason, a raw pointer *data member*, so box2d joints cannot be created yet.
 - **A pointer an instance method returns is the library's own object, borrowed, and the class at the centre of a factory-style API can finally reach Python.** tinyxml2's `XMLElement` and box2d's `b2Body` are handed out by raw pointer and freed by the library, and both halves of that were refused: every pointer return was declined because a `T*` does not say who owns the `T`, and a class with a private destructor was skipped whole because `tp_dealloc` could not free it. So `XMLDocument` bound 22 of its methods and not one of them yielded an element. A `T*` returned by an **instance method** now crosses as a borrow: a wrapper over the library's object that frees nothing and holds a reference to the receiver's owner, which is the policy pybind11 calls `reference_internal`, chosen from the signature instead of written per method. Null is `None`, and the stub says `T | None`. A borrow of a borrow holds the root owner rather than the node it passed through, so a deep walk pins the document once per wrapper kept; and a method that returns the receiver or its owner hands back the Python object that already exists, so `node.GetDocument() is doc`. A method that returns a pointer to one of its own arguments, or into one (`Node* attach(Node& child)`), is held valid by that argument and not by the receiver. A class whose destructor is not accessible binds as a class that is only ever borrowed: the skip existed because `py_dealloc`'s runtime `if (owns) delete` instantiated `delete` for every `T`, so the fix is an `if constexpr`. Constructing such a class from Python is refused, with a public constructor or a trampoline or without, because nothing could free the result; and a method of it that returns or takes the class by value is declined rather than costing the module, since receiving the value means destroying it. Measured on the corpus: tinyxml2 goes from 20 exported names with `XMLElement` absent to 27, with `XMLElement`, `XMLNode` and `XMLText` bound and reachable, and a parsed document can be walked. (`XMLAttribute` is in the module and cannot be obtained yet: every accessor for it returns `const XMLAttribute*`. Attribute values are read through `XMLElement.Attribute` and its typed forms.) What stays refused, each for a stated reason: a `T*` from a static method, a free function or an operator, which has no receiver to keep alive; any `const T*`, because a wrapper is a mutable handle; and a `T*` from `begin`, `end` or `data`, which is a position and not an object. A raw pointer nested inside a standard template is declined wherever it appears, as a return, a parameter or a data member: `std::vector<T*>`, `std::pair<T*, bool>`, `std::optional<T*>`, `std::map<std::string, T*>`, `std::function<void(T*)>`. None of those was ever convertible, and each was a compile error for the whole module rather than a declined method, on any class. So is a method that can only be called on an rvalue (`T* finish() &&`), and a pointer to a class template that is declared and never defined. Where a class overloads a name with a pointer-returning method and one that was bound before, the one bound before is tried first, so `find(3)` still reaches `int find(int)` when `Node* find(double)` is declared ahead of it. What a borrow has to assume and cannot check is documented rather than hidden: that the object belongs to the receiver, that the owner does not free it while itself alive (`XMLDocument::Clear`), and that the caller was not meant to `delete` it. Python only; this is the return half of #48.
   - **Behaviour change**: a class with a private, protected or deleted destructor is now present in the module where it used to be skipped with a message. `hasattr(module, "XMLElement")` flips to true; calling it still raises `TypeError`.
 - **The compatibility corpus can require a method, not only a class.** A `must_export` entry written `Class.member` is checked against the class's own names. Without it this change would have published a false result: box2d's `b2Body` is now a name in the module and is still unobtainable, because `b2World::CreateBody` takes a pointer parameter and those are not bound. Judged by class names the row would have read "binds" for a world nothing can be put in. box2d now requires `b2World.CreateBody` and `b2Body.CreateFixture` and stays partial, naming them; tinyxml2 requires `XMLDocument.RootElement`, `XMLElement.FirstChildElement` and `XMLElement.Attribute` and passes.

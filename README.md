@@ -208,6 +208,7 @@ See [the CLI reference](docs/reference/cli.md#csharp-output).
 | **Method Overloading** | ✅ | ⚠️ | ⚠️ | ✅ |
 | **Smart Pointers** | ⚠️ | ⚠️ | ⚠️ | ❌ |
 | **Borrowed pointer returns** | ✅ | ❌ | ❌ | ✅ |
+| **Pointer parameters** | ✅ | ❌ | ❌ | ❌ |
 | **Exception Handling** | ✅ | ✅ | ✅ | ✅ |
 | **Cross-Module Types** | ✅ | ❌ | ❌ | ❌ |
 | **Zero-Copy Buffers** | ✅ | ❌ | ❌ | ❌ |
@@ -298,10 +299,18 @@ library's own object, not a copy. The wrapper frees nothing and keeps the
 owner alive, so `doc.RootElement().FirstChildElement("body")` works and stays
 valid for as long as you hold it; a null pointer is `None`. A class with a
 private destructor, which is how a factory-style library says "we free these",
-binds as a class you can only be handed. `const T*` returns and pointer
-*parameters* are not bound yet, and what a borrow has to assume about lifetime
-is spelled out in
+binds as a class you can only be handed. `const T*` returns are not bound
+yet, and what a borrow has to assume about lifetime is spelled out in
 [the type reference](docs/reference/type-conversion.md#pointer-returns-python).
+
+✅ **Pointer parameters** (Python): a method taking `T*` or `const T*` takes
+the object a wrapper holds, so `world.CreateBody(definition)`,
+`world.DestroyBody(body)` and `node.InsertEndChild(child)` work. `None` is
+passed as a null pointer only where the header gives the parameter a default
+argument and is a `TypeError` everywhere else, and a pointer declared beside
+an element count is treated as an array and not bound. Constructors and free
+functions do not take pointers yet. Details in
+[the type reference](docs/reference/type-conversion.md#pointer-parameters-python).
 
 ✅ **Constructors**: Lua's `Cls(...)`, `Cls:new(...)` and `Cls.new(...)` and
 JavaScript's `new Cls(...)` call the constructor whose parameters the
