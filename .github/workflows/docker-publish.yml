@@ -10,8 +10,11 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  # Must be lowercase for Docker registry
-  IMAGE_NAME: franciscothiesen/mirror_bridge
+  # Must be lowercase for Docker registry. The namespace has to be the one that
+  # owns this repository: GITHUB_TOKEN can only publish packages there, and a
+  # push anywhere else is refused with "The requested installation does not
+  # exist", which is how every publish failed after the move to the org.
+  IMAGE_NAME: mirror-bridge/mirror_bridge
 
 jobs:
   # Build the main (lean) image
