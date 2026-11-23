@@ -21,6 +21,14 @@ struct Engine {
     int twice() const { return seed * 2; }
 };
 
+// A member with no conversion is left out of its class, and the build is
+// where that should be said: `cursor` is a raw pointer.
+struct Tape {
+    int length = 8;
+    double* cursor = nullptr;
+    int half() const { return length / 2; }
+};
+
 // Declined at compile time, announced at module init: the import is the only
 // place `generate` can hear about it.
 void accumulate(const std::vector<double>& xs, double& total);

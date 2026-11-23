@@ -129,6 +129,17 @@ concept HasCustomJsConverter = requires {
     { CustomJsConverter<T>::has_custom_conversion } -> std::convertible_to<bool>;
 } && CustomJsConverter<T>::has_custom_conversion;
 
+}  // namespace javascript
+
+// Tells core's gates, which is what lets such a type be a data member.
+namespace core {
+template<typename T>
+    requires ::mirror_bridge::javascript::HasCustomJsConverter<T>
+inline constexpr bool has_custom_conversion<T> = true;
+}
+
+namespace javascript {
+
 // The two overloads that route to a CustomJsConverter specialization are
 // defined after the composite converters, further down, on purpose: see the
 // note at the end of the declaration block.
@@ -1933,12 +1944,42 @@ from_javascript(napi_env env, napi_value value, T& out) {
 // ============================================================================
 
 template<Bindable T>
+napi_value bind_class_impl(napi_env env, napi_value exports, const char* name);
+
+// A member with no conversion is left out of the class. Someone who names a
+// class by hand and would get fewer properties than the struct has should
+// hear that from the compiler, so here it is an error.
+// bind_class_when_bindable, which is what `mirror_bridge generate` emits,
+// leaves the member out and binds the rest.
+template<Bindable T>
 napi_value bind_class(napi_env env, napi_value exports, const char* name) {
     static_assert(core::validate_bindable_members<T>(),
-        "bind_class<T>: T contains members with types that mirror_bridge cannot convert. "
-        "Add a custom type converter for them. [[=exclude{}]] will not help here: "
-        "this backend binds every named member and does not read annotations yet.");
+        "bind_class<T>: T has a data member whose type mirror_bridge cannot convert. "
+        "Add a custom type converter for it (and, if that converter is a plain overload, "
+        "say so with core::has_custom_conversion<Type> = true), or bind the class with "
+        "bind_class_when_bindable<T>, which leaves such a member out and binds the rest. "
+        "[[=exclude{}]] will not help here: this backend does not read annotations yet.");
+    return bind_class_impl<T>(env, exports, name);
+}
 
+// What `mirror_bridge generate` emits. A class nothing can be read from is
+// skipped by name, and a member with no conversion costs only itself, where
+// either used to be a compile error for every class in the module.
+template<typename T>
+napi_value bind_class_when_bindable(napi_env env, napi_value exports, const char* name) {
+    if constexpr (!Bindable<std::remove_cvref_t<T>>) {
+        std::fprintf(stderr,
+            "mirror_bridge: skipped '%s' (not bindable: no reflectable "
+            "members/methods)\n", name);
+        return nullptr;
+    } else {
+        core::report_declined_data_members<T>(name);
+        return bind_class_impl<T>(env, exports, name);
+    }
+}
+
+template<Bindable T>
+napi_value bind_class_impl(napi_env env, napi_value exports, const char* name) {
     static_assert(core::type_key_is_distinctive<T>(),
         "bind_class<T>: this compiler cannot spell T distinctly, so T would compare "
         "equal to another specialisation and the boundary check could not tell them "

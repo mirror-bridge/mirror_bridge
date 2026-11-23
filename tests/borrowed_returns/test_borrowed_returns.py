@@ -176,11 +176,10 @@ assert not hasattr(b, "global_default"), "a free function returning const T* was
 print("  ✓ static methods and free functions returning a pointer stay unbound")
 
 print("Test 12: a pointer that names nothing wrappable stays unbound...")
-for name in ("handle", "slots", "raw_counter", "holder", "last_error", "raw_root",
-             "all_items"):
+for name in ("handle", "slots", "raw_counter", "holder", "last_error", "all_items"):
     assert not hasattr(reg, name), f"Registry.{name} was bound"
 print("  ✓ incomplete pointee, T**, int*, Holder<Opaque>*, std::error_code*,")
-print("    a struct of raw pointers, and std::vector<Item*>")
+print("    and std::vector<Item*>")
 
 print("Test 13: a pointer to a class no module binds is refused by name...")
 try:
@@ -190,6 +189,17 @@ except TypeError as e:
 else:
     raise AssertionError("a pointer to an unbound class crossed")
 print("  ✓ TypeError names borrowed::Unbound")
+# A struct with a raw pointer member used to be in the list above: such a
+# class could never be bound, so a pointer to one could never be a borrow.
+# It can be bound now, without that member, so the pointer is treated like
+# any other pointer to a class this module happens not to bind.
+try:
+    reg.raw_root()
+except TypeError as e:
+    assert "borrowed::RawNode" in str(e), str(e)
+else:
+    raise AssertionError("a pointer to an unbound class crossed")
+print("  ✓ and so is a pointer to a struct with a raw pointer member")
 
 print("Test 14: the stub admits the None...")
 stub = b.__mirror_bridge_stubs__()
@@ -334,8 +344,11 @@ for name in ("visit", "insert", "maybe", "tagged", "by_name", "both"):
 # A method that can only be called on an rvalue.
 for name in ("take", "drain"):
     assert not hasattr(b.Registry, name), f"Registry.{name} is &&-qualified"
-# A class with raw pointers in its data members.
-assert not hasattr(b, "PointerBag")
+# Data members that carry raw pointers. They used to cost the class; now the
+# class binds without them (tests/declined_members has the rest of that).
+bag = b.PointerBag()
+assert bag.n == 0
+assert not hasattr(bag, "items") and not hasattr(bag, "by_name")
 print("  ✓ each is declined, and its class and module are intact")
 
 print("\nAll borrowed-return tests passed.")

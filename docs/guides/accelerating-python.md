@@ -191,15 +191,14 @@ with the reason:
 
 ⚠ 3 names were not bound into 'hot' — Python raises AttributeError on them:
 
-    1 class(es) the module declined
-      Node — a member type has no converter; mark it [[=exclude{}]] or add a
-      custom converter
-
     2 free function(s) the module declined
       out_param — a non-const reference parameter, whose writes cannot reach
       the caller: Python would pass a copy and the result would be lost.
       Return the value instead
       label — the return type has no converter
+
+    1 data member(s) the module declined — the class is bound, these are not on it
+      Node::parent — its type has no conversion
 ```
 
 `--json` carries the same thing, which is the form to use when nothing is

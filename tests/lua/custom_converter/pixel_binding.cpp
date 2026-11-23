@@ -80,11 +80,32 @@ inline bool from_lua(lua_State* L, int idx, Color3& color) {
     return false;
 }
 
+// Bag<Tag*> <-> a Lua array of the tags' ids. Read-only: there is nowhere for
+// a Tag built from a number to live.
+inline void to_lua(lua_State* L, const Bag<Tag*>& bag) {
+    lua_createtable(L, static_cast<int>(bag.size()), 0);
+    int index = 1;
+    for (const Tag* tag : bag) {
+        lua_pushinteger(L, tag->id);
+        lua_rawseti(L, -2, index++);
+    }
+}
+
+inline bool from_lua(lua_State*, int, Bag<Tag*>&) {
+    return false;
+}
+
 } // namespace mirror_bridge::lua
 
 // Now include mirror_bridge_lua - it will find our custom converters
 #include "lua/mirror_bridge_lua.hpp"
 
+// A container of raw pointers is a type the member gate refuses, and a plain
+// overload is not something it can see. This is how it is told.
+template<>
+inline constexpr bool mirror_bridge::core::has_custom_conversion<Bag<Tag*>> = true;
+
 MIRROR_BRIDGE_LUA_MODULE(pixel,
     mirror_bridge::lua::bind_class<Pixel>(L, "Pixel");
+    mirror_bridge::lua::bind_class<Scene>(L, "Scene");
 )

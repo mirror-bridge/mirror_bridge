@@ -336,7 +336,7 @@ and refuses the rest, almost all of it by name at build time.
 | `T*` | a method named `begin`, `end`, `data` or one of their `c`/`r` forms | Not bound. That is a position, not an object: `end()` is one past the last element |
 | `const T*` | anywhere | Not bound. A wrapper is a mutable handle, so a borrow would let Python write through a pointer C++ declared read-only |
 | `T**`, `int*`, a pointer to a forward-declared class or to a class template that is declared and never defined | anywhere | Not bound |
-| a raw pointer inside a standard template: `std::vector<T*>`, `std::pair<T*, bool>`, `std::optional<T*>`, `std::map<K, T*>`, `std::function<void(T*)>` | a return, a parameter or a data member | Not bound. A class with such a data member is skipped |
+| a raw pointer inside a standard template: `std::vector<T*>`, `std::pair<T*, bool>`, `std::optional<T*>`, `std::map<K, T*>`, `std::function<void(T*)>` | a return, a parameter or a data member | Not bound. Such a data member is left out and its class binds without it |
 | `T*` | a method that is `&&`-qualified | Not bound, like any `&&`-qualified method: a wrapper's object is never an rvalue |
 
 ```cpp
@@ -920,6 +920,7 @@ cannot cross is something you hear about from `generate` rather than from an
 
 | Shape | Status | What to write instead |
 |-------|--------|-----------------------|
+| A data member whose type has no conversion: a raw pointer, `void*`, a function pointer, a container of raw pointers | Left out, in every backend. The class binds with its other members and all its methods, and `generate` names the member | Nothing. A hand-written `bind_class<T>` refuses such a class unless the member is marked `[[=exclude{}]]`; `bind_class_when_bindable<T>` is what `generate` emits and leaves it out. See [errors](errors.md#unconvertible-member-type-bind_class--mirror_bridge_validate) |
 | `T*` as a parameter of a method, `T` a bound class | Python: bound, takes the wrapper's own object. Lua, JavaScript: not bound | Nothing. See [Pointer parameters](#pointer-parameters-python) for `None`, arrays and what it assumes |
 | `T*` as a parameter of a constructor or a free function | Not bound | Take `T&`, which aliases the Python object |
 | `T*` returned by an instance method, `T` a bound class | Python: bound, a borrow that keeps the owner alive. Lua, JavaScript: not bound | Nothing. See [Pointer returns](#pointer-returns-python) for what it assumes about lifetime |

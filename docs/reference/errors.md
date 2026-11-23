@@ -76,12 +76,14 @@ diff -u api/m.pyi build/m.pyi
 **Symptom**
 
 ```
-error: static assertion failed: bind_class<T>: T contains members with types that mirror_bridge cannot convert. Mark unconvertible members with [[=exclude{}]] or add a custom type converter. Supported: arithmetic, std::string, containers, smart pointers, std::optional, std::expected, enums, and nested bindable classes.
+error: static assertion failed: bind_class<T>: T has a data member whose type mirror_bridge cannot convert. Mark it [[=exclude{}]], add a custom type converter, or bind the class with bind_class_when_bindable<T>, which leaves such a member out and binds the rest. Supported: arithmetic, std::string, containers, smart pointers, std::optional, std::expected, enums, C arrays and nested bindable classes.
 ```
 
-**Cause** One of the class's data members has a type mirror_bridge does not know how to marshal (e.g. a raw `void*`, a third-party handle, a `std::mutex`, or a non-bindable nested type).
+**Cause** You bound the class by hand with `bind_class<T>`, and one of its data members has a type mirror_bridge does not know how to marshal (a raw pointer, a `void*`, a function pointer, a `std::mutex`, a container of raw pointers).
 
-**Fix** Either exclude the offending member from binding, or provide a custom converter. To exclude:
+A member like that never reaches the target language: the class binds without it. `mirror_bridge generate` does exactly that and names the member in its report (see [Names missing from the module](#names-missing-from-the-module)). A hand-written `bind_class<T>` refuses instead, because someone who lists a class by name and would get fewer attributes than the struct has should hear it from the compiler.
+
+**Fix** Say that leaving it out is what you want, in one of two ways. Mark the member:
 
 ```cpp
 using mirror_bridge::exclude;
@@ -92,10 +94,27 @@ struct MyClass {
 };
 ```
 
-To pinpoint *which* member fails before reaching `bind_class`, drop in the validator at the definition site:
+or, for a header you cannot edit, bind the class the way `generate` does:
 
 ```cpp
-MIRROR_BRIDGE_VALIDATE(MyClass);   // static_assert with the same message, closer to the type
+mirror_bridge::bind_class_when_bindable<ThirdParty>(m, "ThirdParty");
+```
+
+(`mirror_bridge::lua::` and `mirror_bridge::javascript::` have the same function. Those two backends do not read annotations, so there it is the only way.)
+
+If the member's type has a converter of your own, it is not unconvertible, and the gate needs to know. A specialization of `CustomTypeConverter`, `CustomLuaConverter` or `CustomJsConverter` tells it by existing. A converter written as plain `to_lua`/`from_lua` or `to_javascript`/`from_javascript` overloads cannot be seen, so say it beside them:
+
+```cpp
+template<>
+inline constexpr bool mirror_bridge::core::has_custom_conversion<Bag<Node*>> = true;
+```
+
+The member is still part of the C++ object. Copies made on the C++ side carry it; the class does not pickle, because the state could not hold it.
+
+To pinpoint which class fails before reaching `bind_class`, drop in the validator at the definition site:
+
+```cpp
+MIRROR_BRIDGE_VALIDATE(MyClass);   // static_assert with the same condition, closer to the type
 ```
 
 ### Trampoline does not derive from the bound type
@@ -135,19 +154,19 @@ whether each class and function can bind and reports it when it is loaded.
 rather than in your first import:
 
 ```
-    1 class(es) the module declined
-      Node — a member type has no converter; mark it [[=exclude{}]] or add a custom converter
-
     2 free function(s) the module declined
       out_param — a non-const reference parameter, whose writes cannot reach the caller:
       Python would pass a copy and the result would be lost. Return the value instead
       label — the return type has no converter
 
+    1 data member(s) the module declined — the class is bound, these are not on it
+      Node::parent — its type has no conversion
+
     1 class(es) that lost their unqualified name to another class
       lib::detail::Config — 'Config' is bound to lib::Config instead
 ```
 
-**Cause** The build succeeded, but some names you wrote are not in the module. Enum *types* are not exported as Python objects, and a free function that is overloaded, or that shares its name with a function template, has no unique address to bind. A class or function the module declined is one whose parameters or return type have no conversion, and the reason given is the specific gate that refused.
+**Cause** The build succeeded, but some names you wrote are not in the module. Enum *types* are not exported as Python objects, and a free function that is overloaded, or that shares its name with a function template, has no unique address to bind. A function or method the module declined is one whose parameters or return type have no conversion, and the reason given is the specific gate that refused. A declined data member is one whose type has no conversion: its class is bound, with every other member and method, and that one attribute is absent.
 
 **Fix** Each group states its own. For an overload set, give one overload a distinct name or add a single non-overloaded wrapper and bind that. For a declined name, the reason names the fix: write a converter, change the return type, or stop writing through a parameter. The full list is also in `<output>/<module>_plan.txt`, and in `--json` under `declined`.
 

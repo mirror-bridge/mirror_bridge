@@ -136,7 +136,8 @@ struct Crate {
     Item second;
 };
 
-// A struct mirror_bridge would refuse to bind: its members are raw pointers.
+// A struct with a member that has no conversion. It used to be unbindable
+// for that; now the member is what is left out. Nothing here binds it.
 struct RawNode {
     int depth = 0;
     RawNode* children[8] = {};
@@ -369,8 +370,9 @@ struct Opener {
     int n() const { return 1; }
 };
 
-// A class whose data member carries raw pointers is not one bind_class can
-// accept, and has to be skipped with a message and not with a compile error.
+// Data members that carry raw pointers have no conversion. They are left out
+// and the class binds with what remains; before, the class was skipped with
+// a message, and before that it was a compile error.
 struct PointerBag {
     int n = 0;
     std::vector<Item*> items;
