@@ -225,6 +225,7 @@ consteval std::string synth_name(info tmpl, const std::vector<info>& args) {
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1608,6 +1609,56 @@ struct is_container<T, std::void_t<
 >> : std::bool_constant<!std::is_same_v<T, std::string> &&
                          !std::is_same_v<T, std::string_view>> {};
 
+// ============================================================================
+// C Array Members
+// ============================================================================
+//
+// `float rgba[4]`, `int cells[3][3]`, `char name[64]`. is_convertible_type
+// below says yes to one whenever its element converts, which every backend
+// then has to make true. These are the parts of doing so that do not depend
+// on the language, kept here so three backends cannot each get them slightly
+// differently.
+
+// A fixed char buffer is how a C-style struct holds a string, so it crosses
+// as the language's string and not as a sequence of N integers.
+template<typename T>
+inline constexpr bool is_char_buffer_v =
+    std::is_array_v<T> && std::is_same_v<std::remove_cv_t<std::remove_extent_t<T>>, char>;
+
+// How many bytes of text the buffer holds: up to the first NUL, or all N. A
+// buffer filled to the brim with no terminator is legal C and must not be
+// read past, which is what strlen would do.
+template<std::size_t N>
+std::size_t char_buffer_length(const char (&buffer)[N]) {
+    const void* terminator = std::memchr(buffer, '\0', N);
+    return terminator ? static_cast<std::size_t>(static_cast<const char*>(terminator) - buffer) : N;
+}
+
+// Copies `size` bytes in, or refuses if they and a terminator do not fit.
+// Never a truncation: a path or a name cut short without a word is the bug
+// this type is known for. The tail is zeroed so nothing of the previous
+// value survives behind the new terminator.
+template<std::size_t N>
+bool fill_char_buffer(char (&buffer)[N], const char* bytes, std::size_t size) {
+    if (size >= N) return false;
+    std::memcpy(buffer, bytes, size);
+    std::memset(buffer + size, 0, N - size);
+    return true;
+}
+
+// Stores a converted value into a data member. An array cannot be assigned as
+// a whole, so it is assigned element by element, through every extent.
+template<typename Member>
+void assign_member(Member& member, Member& converted) {
+    if constexpr (std::is_array_v<Member>) {
+        for (std::size_t i = 0; i < std::extent_v<Member>; ++i) {
+            assign_member(member[i], converted[i]);
+        }
+    } else {
+        member = std::move(converted);
+    }
+}
+
 // Checks if a type is convertible by mirror_bridge
 template<typename T>
 consteval bool is_convertible_type() {
@@ -1865,6 +1916,11 @@ template<EnumType T>
 napi_value to_javascript(napi_env env, const T& value);
 template<StringLike T>
 napi_value to_javascript(napi_env env, const T& value);
+template<std::size_t N>
+napi_value to_javascript(napi_env env, const char (&buffer)[N]);
+template<typename E, std::size_t N>
+    requires (!std::is_same_v<std::remove_cv_t<E>, char>)
+napi_value to_javascript(napi_env env, const E (&array)[N]);
 template<ByteContainer T>
 napi_value to_javascript(napi_env env, const T& container);
 template<Container T>
@@ -1907,6 +1963,11 @@ template<EnumType T>
 bool from_javascript(napi_env env, napi_value value, T& out);
 template<StringLike T>
 bool from_javascript(napi_env env, napi_value value, T& out);
+template<std::size_t N>
+bool from_javascript(napi_env env, napi_value value, char (&buffer)[N]);
+template<typename E, std::size_t N>
+    requires (!std::is_same_v<std::remove_cv_t<E>, char>)
+bool from_javascript(napi_env env, napi_value value, E (&array)[N]);
 template<typename E, std::size_t N>
     requires (!HasCustomJsConverter<std::array<E, N>>)
 bool from_javascript(napi_env env, napi_value value, std::array<E, N>& arr);
@@ -1985,6 +2046,28 @@ napi_value to_javascript(napi_env env, const T& value) {
         napi_create_string_utf8(env, value.data(), value.size(), &result);
     } else {
         napi_create_string_utf8(env, value, NAPI_AUTO_LENGTH, &result);
+    }
+    return result;
+}
+
+// C array members. The member gate accepts one whenever its element converts
+// and this backend had no overload for any, so a single `float rgba[4]` was a
+// compile error for the whole module. A char buffer is the string it holds;
+// anything else is an Array, one level per extent.
+template<std::size_t N>
+napi_value to_javascript(napi_env env, const char (&buffer)[N]) {
+    napi_value result;
+    napi_create_string_utf8(env, buffer, core::char_buffer_length(buffer), &result);
+    return result;
+}
+
+template<typename E, std::size_t N>
+    requires (!std::is_same_v<std::remove_cv_t<E>, char>)
+napi_value to_javascript(napi_env env, const E (&array)[N]) {
+    napi_value result;
+    napi_create_array_with_length(env, N, &result);
+    for (std::size_t i = 0; i < N; ++i) {
+        napi_set_element(env, result, static_cast<uint32_t>(i), to_javascript(env, array[i]));
     }
     return result;
 }
@@ -2132,6 +2215,40 @@ bool from_javascript(napi_env env, napi_value value, std::array<E, N>& arr) {
         napi_value js_item;
         if (napi_get_element(env, value, static_cast<uint32_t>(i), &js_item) != napi_ok) return false;
         if (!from_javascript(env, js_item, arr[i])) return false;
+    }
+    return true;
+}
+
+// A char buffer from a JavaScript string whose UTF-8 form fits with its
+// terminator. Only an actual string: a number is not coerced.
+template<std::size_t N>
+bool from_javascript(napi_env env, napi_value value, char (&buffer)[N]) {
+    napi_valuetype type;
+    if (napi_typeof(env, value, &type) != napi_ok || type != napi_string) return false;
+    size_t size = 0;
+    if (napi_get_value_string_utf8(env, value, nullptr, 0, &size) != napi_ok) return false;
+    if (size >= N) return false;
+    // N-API writes at most N - 1 bytes and a terminator, and the length was
+    // checked above, so this is the whole string. The tail is zeroed first so
+    // nothing of the previous value survives behind it.
+    std::memset(buffer, 0, N);
+    return napi_get_value_string_utf8(env, value, buffer, N, &size) == napi_ok;
+}
+
+// Any other C array from an Array of exactly N elements, as std::array is.
+template<typename E, std::size_t N>
+    requires (!std::is_same_v<std::remove_cv_t<E>, char>)
+bool from_javascript(napi_env env, napi_value value, E (&array)[N]) {
+    bool is_array = false;
+    if (napi_is_array(env, value, &is_array) != napi_ok || !is_array) return false;
+
+    uint32_t length = 0;
+    if (napi_get_array_length(env, value, &length) != napi_ok || length != N) return false;
+
+    for (std::size_t i = 0; i < N; ++i) {
+        napi_value js_item;
+        if (napi_get_element(env, value, static_cast<uint32_t>(i), &js_item) != napi_ok) return false;
+        if (!from_javascript(env, js_item, array[i])) return false;
     }
     return true;
 }
@@ -3077,12 +3194,30 @@ napi_value js_setter(napi_env env, napi_callback_info info) {
         if constexpr (core::NestedBindable<Member>) {
             expected = js_expected_name<Member>();
         }
+        if constexpr (core::is_char_buffer_v<MemberType>) {
+            // The one refusal whose reason is a size, which "cannot be
+            // assigned from string" would hide.
+            napi_valuetype type;
+            size_t size = 0;
+            if (napi_typeof(env, args[0], &type) == napi_ok && type == napi_string &&
+                napi_get_value_string_utf8(env, args[0], nullptr, 0, &size) == napi_ok) {
+                char message[256];
+                std::snprintf(message, sizeof message,
+                              "%s: a string of %zu bytes does not fit in char[%zu], which "
+                              "holds %zu and a terminator", member_name_sv.data(), size,
+                              std::extent_v<MemberType>, std::extent_v<MemberType> - 1);
+                napi_throw_range_error(env, nullptr, message);
+                return nullptr;
+            }
+        }
         throw_js_bad_field(env, args[0], member_name_sv.data(), expected);
         return nullptr;
     }
 
     try {
-        (*self).[:member:] = std::move(cpp_value);
+        // Converted into a local first, so an Array that fails half way
+        // through leaves the member as it was.
+        core::assign_member((*self).[:member:], cpp_value);
     } catch (const std::exception& e) {
         napi_throw_error(env, nullptr, e.what());
         return nullptr;
@@ -3439,7 +3574,7 @@ struct JsConversionHelper {
                     return;
                 }
 
-                out.[:member:] = std::move(cpp_value);
+                core::assign_member(out.[:member:], cpp_value);
             }(), ...);
         }(std::make_index_sequence<member_count>{});
 

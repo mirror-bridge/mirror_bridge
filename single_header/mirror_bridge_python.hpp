@@ -225,6 +225,7 @@ consteval std::string synth_name(info tmpl, const std::vector<info>& args) {
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1607,6 +1608,56 @@ struct is_container<T, std::void_t<
     decltype(std::declval<T>().size())
 >> : std::bool_constant<!std::is_same_v<T, std::string> &&
                          !std::is_same_v<T, std::string_view>> {};
+
+// ============================================================================
+// C Array Members
+// ============================================================================
+//
+// `float rgba[4]`, `int cells[3][3]`, `char name[64]`. is_convertible_type
+// below says yes to one whenever its element converts, which every backend
+// then has to make true. These are the parts of doing so that do not depend
+// on the language, kept here so three backends cannot each get them slightly
+// differently.
+
+// A fixed char buffer is how a C-style struct holds a string, so it crosses
+// as the language's string and not as a sequence of N integers.
+template<typename T>
+inline constexpr bool is_char_buffer_v =
+    std::is_array_v<T> && std::is_same_v<std::remove_cv_t<std::remove_extent_t<T>>, char>;
+
+// How many bytes of text the buffer holds: up to the first NUL, or all N. A
+// buffer filled to the brim with no terminator is legal C and must not be
+// read past, which is what strlen would do.
+template<std::size_t N>
+std::size_t char_buffer_length(const char (&buffer)[N]) {
+    const void* terminator = std::memchr(buffer, '\0', N);
+    return terminator ? static_cast<std::size_t>(static_cast<const char*>(terminator) - buffer) : N;
+}
+
+// Copies `size` bytes in, or refuses if they and a terminator do not fit.
+// Never a truncation: a path or a name cut short without a word is the bug
+// this type is known for. The tail is zeroed so nothing of the previous
+// value survives behind the new terminator.
+template<std::size_t N>
+bool fill_char_buffer(char (&buffer)[N], const char* bytes, std::size_t size) {
+    if (size >= N) return false;
+    std::memcpy(buffer, bytes, size);
+    std::memset(buffer + size, 0, N - size);
+    return true;
+}
+
+// Stores a converted value into a data member. An array cannot be assigned as
+// a whole, so it is assigned element by element, through every extent.
+template<typename Member>
+void assign_member(Member& member, Member& converted) {
+    if constexpr (std::is_array_v<Member>) {
+        for (std::size_t i = 0; i < std::extent_v<Member>; ++i) {
+            assign_member(member[i], converted[i]);
+        }
+    } else {
+        member = std::move(converted);
+    }
+}
 
 // Checks if a type is convertible by mirror_bridge
 template<typename T>
@@ -3199,6 +3250,14 @@ std::string type_hint() {
         return "str";
     } else if constexpr (std::is_void_v<CleanT>) {
         return "None";
+    } else if constexpr (std::is_array_v<CleanT>) {
+        // A C array member. A char buffer crosses as the string it holds and
+        // any other array as a list of its elements, one level per extent.
+        if constexpr (std::is_same_v<std::remove_cv_t<std::remove_extent_t<CleanT>>, char>) {
+            return "str";
+        } else {
+            return "list[" + type_hint<std::remove_extent_t<CleanT>, P>() + "]";
+        }
     } else if constexpr (std::is_pointer_v<CleanT>) {
         // The only other pointer that gets bound is a pointer to a class.
         // Returned by an instance method it crosses as a borrow of that
@@ -4705,8 +4764,42 @@ bool from_python(PyObject* obj, std::array<T, N>& arr) {
 // Some C/C++ classes use raw arrays as members (e.g., Open3D's MaterialParameter
 // with float f4[4]). Convert to/from Python lists.
 
+// A fixed char buffer (`char name[64]`, Dear ImGui's `char InputBuf[256]`)
+// crosses as the str it holds. The member gate has always said yes to one,
+// because char converts, while the array overloads below exclude it and
+// nothing else took it: a single such member failed the whole module to
+// compile. Declared ahead of those overloads so that a `char rows[4][32]`
+// finds these for its rows.
+//
+// Bytes that are not UTF-8 decode to U+FFFD instead of raising, because this
+// read also runs inside repr() and pickling, where an exception about one
+// field would hide the whole object.
+template<std::size_t N>
+PyObject* to_python(const char (&buffer)[N]) {
+    return PyUnicode_DecodeUTF8(buffer,
+                                static_cast<Py_ssize_t>(core::char_buffer_length(buffer)),
+                                "replace");
+}
+
+// A str that does not fit is a ValueError naming both sizes; see
+// core::fill_char_buffer for why it is never truncated.
+template<std::size_t N>
+bool from_python(PyObject* obj, char (&buffer)[N]) {
+    if (!PyUnicode_Check(obj)) return false;
+    Py_ssize_t size = 0;
+    const char* utf8 = PyUnicode_AsUTF8AndSize(obj, &size);
+    if (!utf8) return false;
+    if (!core::fill_char_buffer(buffer, utf8, static_cast<std::size_t>(size))) {
+        PyErr_Format(PyExc_ValueError,
+                     "a string of %zd bytes does not fit in char[%zu], which holds "
+                     "%zu and a terminator", size, N, N - 1);
+        return false;
+    }
+    return true;
+}
+
 template<typename T, std::size_t N>
-    requires (!std::is_same_v<std::remove_cv_t<T>, char>)  // exclude char[] (string-like)
+    requires (!std::is_same_v<std::remove_cv_t<T>, char>)  // a char buffer is a string, above
 PyObject* to_python(const T (&arr)[N]) {
     PyObject* list = PyList_New(N);
     if (!list) return nullptr;
@@ -4741,6 +4834,13 @@ bool from_python(PyObject* obj, T (&arr)[N]) {
         if (!ok) return false;
     }
     return true;
+}
+
+// A char buffer that was handed a str too long for it has already said so,
+// with the sizes. Everything else that fails to fill an array gets the same
+// TypeError a scalar member does.
+inline void set_array_conversion_error() {
+    if (!PyErr_Occurred()) PyErr_SetString(PyExc_TypeError, "Type conversion failed");
 }
 
 // ============================================================================
@@ -6632,7 +6732,24 @@ PyObject* get_static_data_member_value() {
     using MemberType = std::remove_cvref_t<StaticDataMemberType<T, Index>>;
     // Access the static member via splice
     const auto& value = [:member:];
-    return to_python<MemberType>(value);
+    if constexpr (std::is_array_v<MemberType>) {
+        // The array overloads deduce an element type and an extent, so the
+        // whole array type cannot be handed to them as one template argument.
+        return to_python(value);
+    } else {
+        return to_python<MemberType>(value);
+    }
+}
+
+// Instance members are checked for the class as a whole. Static ones never
+// were, so a `static Registry* instance;` or a `static std::mutex lock;`
+// reached to_python with nothing to convert it and failed the module. A
+// static member that does not convert is left off the class and nothing else
+// is.
+template<typename T, std::size_t Index>
+consteval bool static_data_member_convertible() {
+    return mirror_bridge::core::is_convertible_type<
+        std::remove_cvref_t<StaticDataMemberType<T, Index>>>();
 }
 
 // Get the Nth member function by using cached lookup
@@ -7873,11 +7990,14 @@ int py_setter(PyObject* self, PyObject* value, void* closure) {
         PyErr_SetString(PyExc_AttributeError, "Attribute is const in C++");
         return -1;
     } else if constexpr (std::is_array_v<MemberType>) {
-        // C-style arrays can't be whole-assigned. Fill in-place.
-        if (!from_python(value, (*wrapper->cpp_object).[:member:])) {
-            PyErr_SetString(PyExc_TypeError, "Type conversion failed");
+        // An array cannot be assigned as a whole. Converted into a local
+        // first, so a list that fails half way leaves the member as it was.
+        MemberType converted;
+        if (!from_python(value, converted)) {
+            set_array_conversion_error();
             return -1;
         }
+        core::assign_member((*wrapper->cpp_object).[:member:], converted);
     } else {
         MemberType cpp_value;
         if (!from_python(value, cpp_value)) {
@@ -7968,11 +8088,14 @@ int py_visible_setter(PyObject* self, PyObject* value, void* closure) {
         PyErr_SetString(PyExc_AttributeError, "Attribute is const in C++");
         return -1;
     } else if constexpr (std::is_array_v<MemberType>) {
-        // Array: fill in-place. from_python<T[N]> writes directly into the array.
-        if (!from_python(value, (*wrapper->cpp_object).[:member:])) {
-            PyErr_SetString(PyExc_TypeError, "Type conversion failed");
+        // An array cannot be assigned as a whole. Converted into a local
+        // first, so a list that fails half way leaves the member as it was.
+        MemberType converted;
+        if (!from_python(value, converted)) {
+            set_array_conversion_error();
             return -1;
         }
+        core::assign_member((*wrapper->cpp_object).[:member:], converted);
     } else if constexpr (!std::is_default_constructible_v<MemberType>) {
         // Registration points these at py_readonly_setter, so this is
         // unreachable; it exists so the template still instantiates, as the
@@ -12373,14 +12496,20 @@ BoundClass<T> bind_class(PyObject* module, const char* name,
     if constexpr (static_data_member_count > 0) {
         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
             ([&] {
-                constexpr auto member_name = get_static_data_member_name<T, Is>();
-                // Get the Python value for this static member
-                PyObject* py_value = get_static_data_member_value<T, Is>();
-                if (py_value) {
-                    // Add directly to type dict - Python will make it a class attribute
-                    PyObject* type_dict = type_object.tp_dict;
-                    PyDict_SetItemString(type_dict, member_name, py_value);
-                    Py_DECREF(py_value);
+                if constexpr (static_data_member_convertible<T, Is>()) {
+                    constexpr auto member_name = get_static_data_member_name<T, Is>();
+                    PyObject* py_value = get_static_data_member_value<T, Is>();
+                    if (py_value) {
+                        // Add directly to type dict - Python will make it a class attribute
+                        PyObject* type_dict = type_object.tp_dict;
+                        PyDict_SetItemString(type_dict, member_name, py_value);
+                        Py_DECREF(py_value);
+                    } else {
+                        // A value that failed to convert costs its own
+                        // attribute. Left pending, the error would surface
+                        // from whatever C API call the import makes next.
+                        PyErr_Clear();
+                    }
                 }
             }(), ...);
         }(std::make_index_sequence<static_data_member_count>{});

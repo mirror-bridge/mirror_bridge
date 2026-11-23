@@ -225,6 +225,7 @@ consteval std::string synth_name(info tmpl, const std::vector<info>& args) {
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1608,6 +1609,56 @@ struct is_container<T, std::void_t<
 >> : std::bool_constant<!std::is_same_v<T, std::string> &&
                          !std::is_same_v<T, std::string_view>> {};
 
+// ============================================================================
+// C Array Members
+// ============================================================================
+//
+// `float rgba[4]`, `int cells[3][3]`, `char name[64]`. is_convertible_type
+// below says yes to one whenever its element converts, which every backend
+// then has to make true. These are the parts of doing so that do not depend
+// on the language, kept here so three backends cannot each get them slightly
+// differently.
+
+// A fixed char buffer is how a C-style struct holds a string, so it crosses
+// as the language's string and not as a sequence of N integers.
+template<typename T>
+inline constexpr bool is_char_buffer_v =
+    std::is_array_v<T> && std::is_same_v<std::remove_cv_t<std::remove_extent_t<T>>, char>;
+
+// How many bytes of text the buffer holds: up to the first NUL, or all N. A
+// buffer filled to the brim with no terminator is legal C and must not be
+// read past, which is what strlen would do.
+template<std::size_t N>
+std::size_t char_buffer_length(const char (&buffer)[N]) {
+    const void* terminator = std::memchr(buffer, '\0', N);
+    return terminator ? static_cast<std::size_t>(static_cast<const char*>(terminator) - buffer) : N;
+}
+
+// Copies `size` bytes in, or refuses if they and a terminator do not fit.
+// Never a truncation: a path or a name cut short without a word is the bug
+// this type is known for. The tail is zeroed so nothing of the previous
+// value survives behind the new terminator.
+template<std::size_t N>
+bool fill_char_buffer(char (&buffer)[N], const char* bytes, std::size_t size) {
+    if (size >= N) return false;
+    std::memcpy(buffer, bytes, size);
+    std::memset(buffer + size, 0, N - size);
+    return true;
+}
+
+// Stores a converted value into a data member. An array cannot be assigned as
+// a whole, so it is assigned element by element, through every extent.
+template<typename Member>
+void assign_member(Member& member, Member& converted) {
+    if constexpr (std::is_array_v<Member>) {
+        for (std::size_t i = 0; i < std::extent_v<Member>; ++i) {
+            assign_member(member[i], converted[i]);
+        }
+    } else {
+        member = std::move(converted);
+    }
+}
+
 // Checks if a type is convertible by mirror_bridge
 template<typename T>
 consteval bool is_convertible_type() {
@@ -1797,6 +1848,11 @@ template<EnumType T>
 void to_lua(lua_State* L, const T& value);
 template<StringLike T>
 void to_lua(lua_State* L, const T& value);
+template<std::size_t N>
+void to_lua(lua_State* L, const char (&buffer)[N]);
+template<typename E, std::size_t N>
+    requires (!std::is_same_v<std::remove_cv_t<E>, char>)
+void to_lua(lua_State* L, const E (&array)[N]);
 template<Container T>
 void to_lua(lua_State* L, const T& container);
 template<typename T>
@@ -1829,6 +1885,11 @@ template<EnumType T>
 bool from_lua(lua_State* L, int idx, T& out);
 template<StringLike T>
 bool from_lua(lua_State* L, int idx, T& out);
+template<std::size_t N>
+bool from_lua(lua_State* L, int idx, char (&buffer)[N]);
+template<typename E, std::size_t N>
+    requires (!std::is_same_v<std::remove_cv_t<E>, char>)
+bool from_lua(lua_State* L, int idx, E (&array)[N]);
 template<typename E, std::size_t N>
     requires (!HasCustomLuaConverter<std::array<E, N>>)
 bool from_lua(lua_State* L, int idx, std::array<E, N>& arr);
@@ -1900,6 +1961,25 @@ void to_lua(lua_State* L, const T& value) {
         lua_pushlstring(L, value.data(), value.size());
     } else {
         lua_pushstring(L, value);
+    }
+}
+
+// C array members. The member gate accepts one whenever its element converts
+// and this backend had no overload for any, so a single `float rgba[4]` was a
+// compile error for the whole module. A char buffer is the string it holds;
+// anything else is a table, one level per extent.
+template<std::size_t N>
+void to_lua(lua_State* L, const char (&buffer)[N]) {
+    lua_pushlstring(L, buffer, core::char_buffer_length(buffer));
+}
+
+template<typename E, std::size_t N>
+    requires (!std::is_same_v<std::remove_cv_t<E>, char>)
+void to_lua(lua_State* L, const E (&array)[N]) {
+    lua_createtable(L, static_cast<int>(N), 0);
+    for (std::size_t i = 0; i < N; ++i) {
+        to_lua(L, array[i]);
+        lua_rawseti(L, -2, static_cast<lua_Integer>(i + 1));
     }
 }
 
@@ -2015,6 +2095,33 @@ bool from_lua(lua_State* L, int idx, std::array<E, N>& arr) {
     for (std::size_t i = 0; i < N; ++i) {
         lua_rawgeti(L, idx, static_cast<lua_Integer>(i + 1));
         const bool converted = from_lua(L, -1, arr[i]);
+        lua_pop(L, 1);
+        if (!converted) return false;
+    }
+    return true;
+}
+
+// A char buffer from a Lua string that fits with its terminator. Only an
+// actual string: lua_tolstring would turn a number into one in place, and a
+// failed conversion must leave the caller's value as it found it.
+template<std::size_t N>
+bool from_lua(lua_State* L, int idx, char (&buffer)[N]) {
+    if (lua_type(L, idx) != LUA_TSTRING) return false;
+    size_t size = 0;
+    const char* bytes = lua_tolstring(L, idx, &size);
+    return core::fill_char_buffer(buffer, bytes, size);
+}
+
+// Any other C array from a table of exactly N elements, as std::array is.
+template<typename E, std::size_t N>
+    requires (!std::is_same_v<std::remove_cv_t<E>, char>)
+bool from_lua(lua_State* L, int idx, E (&array)[N]) {
+    if (!lua_istable(L, idx)) return false;
+    if (lua_rawlen(L, idx) != N) return false;
+
+    for (std::size_t i = 0; i < N; ++i) {
+        lua_rawgeti(L, idx, static_cast<lua_Integer>(i + 1));
+        const bool converted = from_lua(L, -1, array[i]);
         lua_pop(L, 1);
         if (!converted) return false;
     }
@@ -2895,7 +3002,7 @@ bool from_lua(lua_State* L, int idx, T& out) {
                     if (!from_lua(L, -1, value)) {
                         success = false;
                     } else {
-                        out.[:member:] = std::move(value);
+                        core::assign_member(out.[:member:], value);
                     }
                 }
 
@@ -3026,12 +3133,26 @@ int lua_newindex(lua_State* L) {
                 } else {
                     MemberType cpp_value;
                     if (!from_lua(L, 3, cpp_value)) {
+                        if constexpr (core::is_char_buffer_v<MemberType>) {
+                            // The one refusal whose reason is a size, which
+                            // "cannot be assigned from string" would hide.
+                            if (lua_type(L, 3) == LUA_TSTRING) {
+                                luaL_error(L, "%s: a string of %d bytes does not fit in "
+                                              "char[%d], which holds %d and a terminator",
+                                           member_name, static_cast<int>(lua_rawlen(L, 3)),
+                                           static_cast<int>(std::extent_v<MemberType>),
+                                           static_cast<int>(std::extent_v<MemberType>) - 1);
+                                return;
+                            }
+                        }
                         lua_bad_field_error(L, member_name,
                                             core::type_key<MemberType>, 3);
                         return;
                     }
 
-                    (*static_cast<T*>(raw)).[:member:] = std::move(cpp_value);
+                    // Converted into a local first, so a table that fails
+                    // half way through leaves the member as it was.
+                    core::assign_member((*static_cast<T*>(raw)).[:member:], cpp_value);
                 }
                 found = true;
             }
@@ -3455,7 +3576,7 @@ struct LuaConversionHelper {
                     return;
                 }
 
-                out.[:member:] = std::move(cpp_value);
+                core::assign_member(out.[:member:], cpp_value);
                 lua_pop(L, 1);
             }(), ...);
         }(std::make_index_sequence<member_count>{});
