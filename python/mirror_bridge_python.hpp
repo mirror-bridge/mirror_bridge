@@ -4766,13 +4766,26 @@ consteval bool return_type_convertible() {
         return true;
     } else {
         using Clean = std::remove_cvref_t<Ret>;
-        if constexpr (mirror_bridge::core::return_is_refused_everywhere<Ret>()) {
-            // A pointer other than `const char*`, a value this code could not
-            // destroy, or a raw pointer nested in a standard template. The
-            // rule and its history are in core, which Lua and JavaScript ask
-            // too. `const char*` cost the most before it was admitted: 1,282
-            // functions in the compatibility corpus return one, among them
-            // every `what()`, SQLiteCpp's 83 and tinyxml2's Attribute().
+        if constexpr (std::is_pointer_v<Clean>) {
+            // A returned pointer says nothing about who owns the thing, which
+            // is why they are refused -- with one exception. `const char*` is
+            // the one pointer whose convention is settled: the caller borrows
+            // it and does not free it. to_python copies it into a Python str
+            // before anything else can run, and answers None for the null a C
+            // API uses to mean absent, so nothing of it outlives the call.
+            //
+            // The parameter gate has drawn this line since Clipper2's
+            // exception constructor needed it. The return gate had not, and it
+            // cost more: 1,282 functions in the compatibility corpus are
+            // declared to return `const char*`, among them every `what()`,
+            // SQLiteCpp's 83 (getColumnName, getErrorMsg) and tinyxml2's
+            // Attribute(). `char*` stays refused: by convention that one is
+            // the caller's to free, and copying it would leak.
+            return std::is_same_v<Clean, const char*>;
+        } else if constexpr (mirror_bridge::core::return_value_cannot_cross<Ret>()) {
+            // A value this code could not destroy, or a raw pointer nested in
+            // a standard template. Both rules are in core, which Lua and
+            // JavaScript ask too.
             return false;
         } else if constexpr (is_std_optional<Clean>::value || is_std_expected<Clean>::value ||
                              is_std_future<Clean>::value || is_std_function<Clean>::value ||

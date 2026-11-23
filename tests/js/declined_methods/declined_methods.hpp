@@ -31,6 +31,15 @@ struct Shelf {
     const char* label() const { return "shelf"; }
     static int capacity() { return 8; }
 
+    // Bound, and worth saying so: these two backends have always carried a
+    // mutable `char*` as a string, and a gate whose job is to turn a compile
+    // error into a missing method has no business taking away one that
+    // compiled. (Python refuses `char*`; that is Python's rule.)
+    char* scratch() { static char text[] = "mut"; return text; }
+    std::vector<char*> words() { static char a[] = "one"; static char b[] = "two"; return {a, b}; }
+    char* dual() { static char text[] = "nc"; return text; }
+    const char* dual() const { return "c"; }
+
     // Not bound, each for its own reason.
     Item* find(int) { return &item; }                       // pointer return
     const Item* peek() const { return &item; }

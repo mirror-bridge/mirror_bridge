@@ -10,6 +10,9 @@ item.value = 5
 shelf:put(item)
 assert(shelf:size() == 1 and shelf:first().value == 5 and shelf:label() == "shelf")
 assert(m.Shelf.capacity() == 8)
+assert(shelf:scratch() == "mut", "a char* return is a string here, as it always was")
+assert(shelf:words()[2] == "two")
+assert(shelf:dual() == "nc", "and an overload returning one is still the first reached")
 print("  ok  the methods that can be called are bound")
 
 for _, name in ipairs({"find", "peek", "adopt", "release", "fill", "each", "all", "weigh"}) do
@@ -29,13 +32,16 @@ local child = io.popen(
 local said = child:read("a")
 child:close()
 for _, name in ipairs({"find", "peek", "adopt", "release", "fill", "each", "all", "weigh",
-                       "shared", "pick", "take"}) do
+                       "shared"}) do
     assert(said:find("skipped method 'Shelf::" .. name .. "'", 1, true),
            name .. " was left out and not named:\n" .. said)
 end
 assert(said:find("the return type has no conversion to Lua", 1, true))
 assert(said:find("a parameter has no conversion from Lua", 1, true))
 assert(not said:find("Shelf::size", 1, true), "a bound method was reported as left out")
+-- One overload of each is bound, so the name is in the class and works.
+assert(not said:find("Shelf::pick", 1, true) and not said:find("Shelf::take", 1, true),
+       "a name with a bound overload was reported as left out:\n" .. said)
 
 local quiet = io.popen("lua5.4 -e 'require(\"declined_methods_lua\")' 2>&1")
 local nothing = quiet:read("a")

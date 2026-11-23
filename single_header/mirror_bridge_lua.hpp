@@ -1102,52 +1102,63 @@ consteval bool value_cannot_be_destroyed() {
 // type that could not be completed. Only std templates are followed: a class
 // template of the user's own, `Grid<Cell*>`, crosses as a wrapped object and
 // converts nothing it is made of.
-template<typename T>
+//
+// MutableCharIsText: Python refuses `char*` (by convention the caller's to
+// free, and nothing a Python str could be written through). Lua and
+// JavaScript have always carried it as a string, and their gate must not
+// start declining what they could already call, so they ask with this set.
+template<typename T, bool MutableCharIsText = false>
 consteval bool carries_raw_pointer();
 
-template<typename T>
+template<typename T, bool MutableCharIsText>
 struct carries_raw_pointer_in : std::false_type {};
 
-template<typename T>
-struct carries_raw_pointer_in<T*> : std::bool_constant<!std::is_same_v<T, const char>> {};
+template<typename T, bool MutableCharIsText>
+struct carries_raw_pointer_in<T*, MutableCharIsText>
+    : std::bool_constant<!(std::is_same_v<T, const char> ||
+                           (MutableCharIsText && std::is_same_v<T, char>))> {};
 
-template<template<typename...> class Family, typename... Args>
-struct carries_raw_pointer_in<Family<Args...>>
+template<template<typename...> class Family, bool MutableCharIsText, typename... Args>
+struct carries_raw_pointer_in<Family<Args...>, MutableCharIsText>
     : std::bool_constant<is_declared_in_std(^^Family<Args...>) &&
-                         (carries_raw_pointer<Args>() || ...)> {};
+                         (carries_raw_pointer<Args, MutableCharIsText>() || ...)> {};
 
 // std::array's size is not a type, so the pattern above does not see it.
-template<typename T, std::size_t N>
-struct carries_raw_pointer_in<std::array<T, N>> : std::bool_constant<carries_raw_pointer<T>()> {};
+template<typename T, std::size_t N, bool MutableCharIsText>
+struct carries_raw_pointer_in<std::array<T, N>, MutableCharIsText>
+    : std::bool_constant<carries_raw_pointer<T, MutableCharIsText>()> {};
 
 // The signature inside std::function<R(Args...)>.
-template<typename R, typename... Args>
-struct carries_raw_pointer_in<R(Args...)>
-    : std::bool_constant<carries_raw_pointer<R>() || (carries_raw_pointer<Args>() || ...)> {};
+template<typename R, bool MutableCharIsText, typename... Args>
+struct carries_raw_pointer_in<R(Args...), MutableCharIsText>
+    : std::bool_constant<carries_raw_pointer<R, MutableCharIsText>() ||
+                         (carries_raw_pointer<Args, MutableCharIsText>() || ...)> {};
 
-template<typename R, typename... Args>
-struct carries_raw_pointer_in<R(Args...) noexcept>
-    : std::bool_constant<carries_raw_pointer<R>() || (carries_raw_pointer<Args>() || ...)> {};
+template<typename R, bool MutableCharIsText, typename... Args>
+struct carries_raw_pointer_in<R(Args...) noexcept, MutableCharIsText>
+    : std::bool_constant<carries_raw_pointer<R, MutableCharIsText>() ||
+                         (carries_raw_pointer<Args, MutableCharIsText>() || ...)> {};
 
-template<typename T>
+template<typename T, bool MutableCharIsText>
 consteval bool carries_raw_pointer() {
-    return carries_raw_pointer_in<std::remove_cvref_t<T>>::value;
+    return carries_raw_pointer_in<std::remove_cvref_t<T>, MutableCharIsText>::value;
 }
 
 // The same question for a type that is not itself the pointer: `Node*` as a
 // whole parameter or return has rules of its own, and this is about what is
 // nested inside something else.
-template<typename T>
+template<typename T, bool MutableCharIsText = false>
 consteval bool carries_nested_raw_pointer() {
-    return !std::is_pointer_v<std::remove_cvref_t<T>> && carries_raw_pointer<T>();
+    return !std::is_pointer_v<std::remove_cvref_t<T>> &&
+           carries_raw_pointer<T, MutableCharIsText>();
 }
 
 // Can this parameter type participate in a bound method signature at all?
 // True iff we can either store it by value OR via pointer-holder.
-template<typename T>
+template<typename T, bool MutableCharIsText = false>
 consteval bool is_param_bindable() {
     using U = std::remove_cvref_t<T>;
-    if constexpr (carries_nested_raw_pointer<U>()) return false;
+    if constexpr (carries_nested_raw_pointer<U, MutableCharIsText>()) return false;
     // A smart pointer to an opaque handle -- sqlite3_stmt, FILE, SSL_CTX, the
     // shape every C library hands out -- is itself a complete class whose
     // pointee is only forward declared. The converter for it asks
@@ -1174,16 +1185,10 @@ consteval bool is_param_bindable() {
     return false;
 }
 
-// The returns no backend can carry, whatever converters it has. Ret is not
-// void.
+// The returns no backend can carry, whatever converters it has. Ret is
+// neither void nor itself a pointer; what a returned pointer means is each
+// backend's own rule.
 //
-//   * A pointer, except `const char*`. A returned pointer says nothing about
-//     who owns the thing. `const char*` is the one whose convention is
-//     settled: the caller borrows it, and every backend copies it into its
-//     own string before anything else can run. `char*` stays refused, since
-//     by convention that one is the caller's to free. (Python then admits a
-//     pointer to a class from an instance method, as a borrow; that is its
-//     own rule, added on top of this one.)
 //   * A value the call site would have to destroy and cannot. A reference to
 //     V itself is fine; a reference to a wrapper of one (`const
 //     std::optional<V>&`) is not, because converting it still instantiates
@@ -1191,17 +1196,15 @@ consteval bool is_param_bindable() {
 //   * A raw pointer nested in a standard template (`std::pair<Node*, bool>`,
 //     `std::vector<Node*>`), for which the outer type's own answer would be
 //     wrong.
-template<typename Ret>
-consteval bool return_is_refused_everywhere() {
+template<typename Ret, bool MutableCharIsText = false>
+consteval bool return_value_cannot_cross() {
     using Clean = std::remove_cvref_t<Ret>;
-    if constexpr (std::is_pointer_v<Clean>) {
-        return !std::is_same_v<Clean, const char*>;
-    } else if constexpr ((!std::is_reference_v<Ret> ||
-                          std::meta::has_template_arguments(std::meta::dealias(^^Clean))) &&
-                         value_cannot_be_destroyed<Clean>()) {
+    if constexpr ((!std::is_reference_v<Ret> ||
+                   std::meta::has_template_arguments(std::meta::dealias(^^Clean))) &&
+                  value_cannot_be_destroyed<Clean>()) {
         return true;
     } else {
-        return carries_nested_raw_pointer<Clean>();
+        return carries_nested_raw_pointer<Clean, MutableCharIsText>();
     }
 }
 
@@ -1265,17 +1268,28 @@ consteval bool static_method_params_all_bindable() {
 // (Python does not use this. It calls through pointer holders and borrows,
 // and has its own, older gate in method_fully_bindable.)
 
+// The rule both predicates follow: this gate exists to turn a compile error
+// into a method left out. It must never leave out a method that compiled, so
+// wherever the backend's own overloads can answer, they do. That is how
+// `char*` stays a string here although Python refuses it, and how a handle
+// type keeps working when its binding supplies a converter for it.
 template<typename Backend, typename Param>
 consteval bool call_param_bindable() {
     using Value = std::remove_cvref_t<Param>;
-    if constexpr (!is_param_bindable<Param>()) {
-        // The refusals every backend shares: a raw pointer, a pointer nested
-        // in a standard template, a type that is not complete.
-        return false;
-    } else if constexpr (std::is_lvalue_reference_v<Param> &&
-                         !std::is_const_v<std::remove_reference_t<Param>>) {
+    if constexpr (std::is_lvalue_reference_v<Param> &&
+                  !std::is_const_v<std::remove_reference_t<Param>>) {
         // The callee writes through it, and the argument is a local built
-        // from the caller's value: the write would be lost.
+        // from the caller's value: the write would be lost. (It also does
+        // not compile: the local is moved into the call.)
+        return false;
+    } else if constexpr (std::is_pointer_v<Value>) {
+        // Convertible exactly when something was written for it: text, or a
+        // converter of the binding's own for a handle type.
+        return Backend::template reads<Value>();
+    } else if constexpr (!is_param_bindable<Param, true>()) {
+        // A pointer nested in a standard template, or a type that is not
+        // complete. The overload for the outer type exists and its body
+        // would not compile, which the backend's answer cannot see.
         return false;
     } else if constexpr (!std::is_default_constructible_v<Value>) {
         // The local has to exist before the conversion fills it.
@@ -1290,7 +1304,9 @@ consteval bool call_return_bindable() {
     using Value = std::remove_cvref_t<Ret>;
     if constexpr (std::is_void_v<Ret>) {
         return true;
-    } else if constexpr (return_is_refused_everywhere<Ret>()) {
+    } else if constexpr (std::is_pointer_v<Value>) {
+        return Backend::template writes<Value>();
+    } else if constexpr (return_value_cannot_cross<Ret, true>()) {
         return false;
     } else if constexpr (names_incomplete_class(^^Value)) {
         return false;
@@ -1393,25 +1409,52 @@ void report_declined_call(const char* class_name, const char* method, CallDeclin
     }
 }
 
-// One line per method left out, when asked, in the shape the Python backend
-// prints and the CLI parses.
+// One line per name left out, when asked, in the shape the Python backend
+// prints and the CLI parses. A name, not an overload: where one overload of
+// `pick` is bound and another is not, `pick` is in the class and calling it
+// works, so reporting it as skipped would be false.
 template<typename Backend, typename T>
 void report_declined_calls(const char* class_name) {
     if (!declined_report_requested()) return;
+
+    constexpr std::size_t method_count = get_member_function_count<T>();
+    std::vector<std::string_view> bound;
+    [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+        ([&] {
+            if constexpr (method_call_bindable<Backend, T, Is>()) {
+                bound.push_back(std::meta::identifier_of(get_member_function<T, Is>()));
+            }
+        }(), ...);
+    }(std::make_index_sequence<method_count>{});
+    constexpr std::size_t static_count = get_static_member_function_count<T>();
+    [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+        ([&] {
+            if constexpr (static_method_call_bindable<Backend, T, Is>()) {
+                bound.push_back(get_static_member_function_name<T, Is>());
+            }
+        }(), ...);
+    }(std::make_index_sequence<static_count>{});
+    auto is_bound = [&](std::string_view name) {
+        for (std::string_view known : bound) if (known == name) return true;
+        return false;
+    };
+
     [&]<std::size_t... Is>(std::index_sequence<Is...>) {
         ([&] {
             constexpr CallDecline why = method_call_decline<Backend, T, Is>();
             constexpr auto method_name_sv = std::meta::identifier_of(get_member_function<T, Is>());
-            report_declined_call<Backend>(class_name, method_name_sv.data(), why);
+            if (!is_bound(method_name_sv)) {
+                report_declined_call<Backend>(class_name, method_name_sv.data(), why);
+            }
         }(), ...);
-    }(std::make_index_sequence<get_member_function_count<T>()>{});
+    }(std::make_index_sequence<method_count>{});
     [&]<std::size_t... Is>(std::index_sequence<Is...>) {
         ([&] {
             constexpr CallDecline why = static_method_call_decline<Backend, T, Is>();
-            report_declined_call<Backend>(class_name,
-                                          get_static_member_function_name<T, Is>(), why);
+            constexpr const char* name = get_static_member_function_name<T, Is>();
+            if (!is_bound(name)) report_declined_call<Backend>(class_name, name, why);
         }(), ...);
-    }(std::make_index_sequence<get_static_member_function_count<T>()>{});
+    }(std::make_index_sequence<static_count>{});
 }
 
 // Nested member utilities (for dict/object conversion)
