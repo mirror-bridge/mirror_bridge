@@ -35,3 +35,12 @@ struct Holder {
     int anchor_value() const { return anchor.value; }
     void reseat(int v) { anchor = Fixed(v); }
 };
+
+// A bit-field is a member no reference can bind to. The setter has to assign
+// it directly; routed through a helper that took the member by reference, a
+// class with one stopped compiling, and the whole module with it.
+struct Packed {
+    unsigned visible : 1 = 0;
+    unsigned level : 3 = 0;
+    int count = 0;
+};

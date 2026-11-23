@@ -28,4 +28,14 @@ h:reseat(21)
 assert(h:anchor_value() == 21, "and C++ can still change it through a method")
 print("  ok  a member with no default constructor binds as readable")
 
+local packed = m.Packed()
+packed.level = 5
+packed.visible = 1
+packed.count = 9
+assert(packed.level == 5 and packed.visible == 1 and packed.count == 9,
+       "a bit-field member reads back what was written")
+local filled = m.Packed()
+filled.level = 2
+print("  ok  a bit-field member is assignable")
+
 print("PASS: const and non-assignable members (Lua)")

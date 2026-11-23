@@ -72,4 +72,22 @@ assert.deepStrictEqual(grid.rows, ["x", "seven77"],
                        "a row that does not fit refuses the whole assignment");
 console.log("  ok  nested arrays, of numbers and of char buffers");
 
+assert.throws(() => { label.name = "ab\u0000cd"; }, /NUL/,
+              "a string with a NUL inside is refused by name");
+console.log("  ok  an embedded NUL is refused, not stored and read back short");
+
+const huge = new m.Huge();
+huge.samples = new Array(1500000).fill(1.5);
+assert.strictEqual(huge.last(), 1.5, "a member too large for the stack is assigned");
+assert.throws(() => { huge.samples = [1, 2]; }, TypeError);
+assert.strictEqual(huge.last(), 1.5);
+console.log("  ok  twelve megabytes written without overflowing the stack");
+
+const names = new m.Names();
+assert.deepStrictEqual(names.names, ["first", "second"]);
+assert.throws(() => { names.names = ["a", "b"]; },
+              "an array of const char* must not keep pointers into JavaScript strings");
+assert.deepStrictEqual(names.names, ["first", "second"]);
+console.log("  ok  an array of const char* reads and refuses assignment");
+
 console.log("PASS: C array members (JavaScript)");

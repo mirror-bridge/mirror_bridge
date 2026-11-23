@@ -118,13 +118,28 @@ attribute in Python.
 **A fixed `char` buffer is the string it holds.** `char name[64]` reads up to
 its first NUL, or to the end of the array if there is none, and never past
 it. Writing takes a string whose UTF-8 form fits with its terminator and
-zeroes the rest of the buffer; one that does not fit is refused with both
-sizes in the message (`ValueError` in Python, `RangeError` in JavaScript, an
-error in Lua) and is never truncated. Only a string is accepted, so a number
-is not coerced. In Python, bytes that are not UTF-8 read as U+FFFD, because
-the read also happens inside `repr()`. `signed char[N]` and `unsigned char[N]`
-are arrays of numbers, not strings. C# does not carry C arrays yet and says
-so per member.
+zeroes the rest of the buffer. A string that does not fit, or that has a NUL
+inside it (which would be stored whole and read back cut short), is refused
+with the reason in the message (`ValueError` in Python, `RangeError` in
+JavaScript, an error in Lua) and is never truncated. A number is not coerced.
+`signed char[N]` and `unsigned char[N]` are arrays of numbers, not strings. C#
+does not carry C arrays yet and says so per member.
+
+In Python, `bytes` are stored as they are: up to all `N` of them, with no
+terminator required. That is the exact form, and it is what pickling and
+`copy.copy` use, so a buffer that was full to the brim or held bytes that are
+not UTF-8 comes back byte for byte. Read as a `str`, such bytes show as
+U+FFFD, because the read also happens inside `repr()`. One consequence in
+every backend: a buffer with no terminator reads as `N` characters, and that
+string cannot be written back as text, since there is no room for the
+terminator.
+
+**An array of `const char*` or `std::string_view` is readable and not
+assignable.** Assigning it would store pointers into strings the host
+language owns and may free as soon as the assignment returns.
+
+**A large array member is fine.** `double samples[2000000]` is converted on
+the heap before it is stored, not on the stack.
 
 **An element can be anything a single value can be.** A `std::vector` of a
 bound class, of `std::optional`, `std::pair` or `std::shared_ptr`, a

@@ -362,7 +362,9 @@ bool from_lua(lua_State* L, int idx, char (&buffer)[N]) {
     if (lua_type(L, idx) != LUA_TSTRING) return false;
     size_t size = 0;
     const char* bytes = lua_tolstring(L, idx, &size);
-    return core::fill_char_buffer(buffer, bytes, size);
+    if (core::text_fits_char_buffer(bytes, size, N) != core::CharBufferFit::fits) return false;
+    core::copy_into_char_buffer(buffer, bytes, size);
+    return true;
 }
 
 // Any other C array from a table of exactly N elements, as std::array is.
@@ -1251,11 +1253,18 @@ bool from_lua(lua_State* L, int idx, T& out) {
                 lua_getfield(L, idx, member_name.data());
 
                 if (!lua_isnil(L, -1)) {
-                    MemberType value;
-                    if (!from_lua(L, -1, value)) {
+                    if constexpr (core::is_array_of_borrowed_text_v<MemberType>) {
+                        // Readable, not assignable: see the trait.
                         success = false;
                     } else {
-                        core::assign_member(out.[:member:], value);
+                        core::ConversionLocal<MemberType> local;
+                        if (!from_lua(L, -1, local.value())) {
+                            success = false;
+                        } else if constexpr (std::is_array_v<MemberType>) {
+                            core::assign_array(out.[:member:], local.value());
+                        } else {
+                            out.[:member:] = std::move(local.value());
+                        }
                     }
                 }
 
@@ -1379,22 +1388,54 @@ int lua_newindex(lua_State* L) {
                 // converted into, because the setter needs a local to move
                 // from. nlohmann::detail::dtoa_impl::diyfp is the real second
                 // case and it took the whole of nlohmann-json down.
+                // The third shape is an array of `const char*` or
+                // std::string_view, which would keep pointers into strings
+                // Lua is free to collect.
                 if constexpr (std::is_const_v<MemberType>
-                              || !std::is_default_constructible_v<MemberType>) {
+                              || !std::is_default_constructible_v<MemberType>
+                              || core::is_array_of_borrowed_text_v<MemberType>) {
                     luaL_error(L, "Field is not assignable from Lua: %s", member_name);
                     return;
                 } else {
-                    MemberType cpp_value;
-                    if (!from_lua(L, 3, cpp_value)) {
+                    // The local lives in this block and the error is raised
+                    // after it: luaL_error leaves by longjmp, which runs no
+                    // destructor, and a large array's local is on the heap.
+                    bool converted = false;
+                    {
+                        core::ConversionLocal<MemberType> local;
+                        converted = from_lua(L, 3, local.value());
+                        if (converted) {
+                            // Converted into a local first, so a table that
+                            // fails half way leaves the member as it was.
+                            if constexpr (std::is_array_v<MemberType>) {
+                                core::assign_array((*static_cast<T*>(raw)).[:member:],
+                                                   local.value());
+                            } else {
+                                (*static_cast<T*>(raw)).[:member:] = std::move(local.value());
+                            }
+                        }
+                    }
+                    if (!converted) {
                         if constexpr (core::is_char_buffer_v<MemberType>) {
-                            // The one refusal whose reason is a size, which
-                            // "cannot be assigned from string" would hide.
+                            // The refusals whose reason is the text itself,
+                            // which "cannot be assigned from string" would
+                            // hide.
                             if (lua_type(L, 3) == LUA_TSTRING) {
+                                size_t size = 0;
+                                const char* bytes = lua_tolstring(L, 3, &size);
+                                constexpr int capacity =
+                                    static_cast<int>(std::extent_v<MemberType>);
+                                if (core::text_fits_char_buffer(bytes, size, capacity) ==
+                                        core::CharBufferFit::embedded_nul) {
+                                    luaL_error(L, "%s: the string contains a NUL byte, which "
+                                                  "would end it early in char[%d]",
+                                               member_name, capacity);
+                                    return;
+                                }
                                 luaL_error(L, "%s: a string of %d bytes does not fit in "
                                               "char[%d], which holds %d and a terminator",
-                                           member_name, static_cast<int>(lua_rawlen(L, 3)),
-                                           static_cast<int>(std::extent_v<MemberType>),
-                                           static_cast<int>(std::extent_v<MemberType>) - 1);
+                                           member_name, static_cast<int>(size),
+                                           capacity, capacity - 1);
                                 return;
                             }
                         }
@@ -1402,10 +1443,6 @@ int lua_newindex(lua_State* L) {
                                             core::type_key<MemberType>, 3);
                         return;
                     }
-
-                    // Converted into a local first, so a table that fails
-                    // half way through leaves the member as it was.
-                    core::assign_member((*static_cast<T*>(raw)).[:member:], cpp_value);
                 }
                 found = true;
             }
@@ -1822,14 +1859,25 @@ struct LuaConversionHelper {
 
                 lua_getfield(L, idx, name);
 
-                MemberType cpp_value;
-                if (!from_lua(L, -1, cpp_value)) {
+                if constexpr (core::is_array_of_borrowed_text_v<MemberType>) {
+                    // Readable, not assignable: see the trait.
                     success = false;
                     lua_pop(L, 1);
                     return;
-                }
+                } else {
+                    core::ConversionLocal<MemberType> local;
+                    if (!from_lua(L, -1, local.value())) {
+                        success = false;
+                        lua_pop(L, 1);
+                        return;
+                    }
 
-                core::assign_member(out.[:member:], cpp_value);
+                    if constexpr (std::is_array_v<MemberType>) {
+                        core::assign_array(out.[:member:], local.value());
+                    } else {
+                        out.[:member:] = std::move(local.value());
+                    }
+                }
                 lua_pop(L, 1);
             }(), ...);
         }(std::make_index_sequence<member_count>{});

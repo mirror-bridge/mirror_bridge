@@ -1634,30 +1634,78 @@ std::size_t char_buffer_length(const char (&buffer)[N]) {
     return terminator ? static_cast<std::size_t>(static_cast<const char*>(terminator) - buffer) : N;
 }
 
-// Copies `size` bytes in, or refuses if they and a terminator do not fit.
-// Never a truncation: a path or a name cut short without a word is the bug
-// this type is known for. The tail is zeroed so nothing of the previous
-// value survives behind the new terminator.
-template<std::size_t N>
-bool fill_char_buffer(char (&buffer)[N], const char* bytes, std::size_t size) {
-    if (size >= N) return false;
-    std::memcpy(buffer, bytes, size);
-    std::memset(buffer + size, 0, N - size);
-    return true;
+// Whether a piece of text can be stored in a char buffer of `capacity` bytes
+// as a C string.
+//
+// It has to fit with its terminator: never a truncation, since a path or a
+// name cut short without a word is the bug this type is known for. And it
+// may not contain a NUL of its own, which would be stored whole and then read
+// back cut short at that byte, the same truncation arrived at another way.
+enum class CharBufferFit { fits, too_long, embedded_nul };
+
+inline CharBufferFit text_fits_char_buffer(const char* bytes, std::size_t size,
+                                           std::size_t capacity) {
+    if (size >= capacity) return CharBufferFit::too_long;
+    if (size > 0 && std::memchr(bytes, '\0', size)) return CharBufferFit::embedded_nul;
+    return CharBufferFit::fits;
 }
 
-// Stores a converted value into a data member. An array cannot be assigned as
-// a whole, so it is assigned element by element, through every extent.
-template<typename Member>
-void assign_member(Member& member, Member& converted) {
-    if constexpr (std::is_array_v<Member>) {
-        for (std::size_t i = 0; i < std::extent_v<Member>; ++i) {
-            assign_member(member[i], converted[i]);
+// Copies `size` bytes in, `size` being at most N, and zeroes the rest so that
+// nothing of the previous value survives behind the new one.
+template<std::size_t N>
+void copy_into_char_buffer(char (&buffer)[N], const char* bytes, std::size_t size) {
+    if (size > 0) std::memcpy(buffer, bytes, size);
+    std::memset(buffer + size, 0, N - size);
+}
+
+// Stores a converted array into an array member. An array cannot be assigned
+// as a whole, so it goes element by element, through every extent. Arrays
+// only: a caller with a member of any other type assigns it directly, because
+// a bit-field is a member no reference can bind to.
+template<typename Array>
+    requires std::is_array_v<Array>
+void assign_array(Array& member, Array& converted) {
+    for (std::size_t i = 0; i < std::extent_v<Array>; ++i) {
+        if constexpr (std::is_array_v<std::remove_extent_t<Array>>) {
+            assign_array(member[i], converted[i]);
+        } else {
+            member[i] = std::move(converted[i]);
         }
-    } else {
-        member = std::move(converted);
     }
 }
+
+// The local a member's new value is converted into before it is stored, so
+// that a value which fails half way leaves the member as it was.
+//
+// An array member can be megabytes (`double samples[2000000]`), and as a
+// plain local it overflowed the stack: the assignment that used to fill such
+// a member in place became a segfault. A large array is therefore built on
+// the heap. Everything else stays an ordinary local, as it always was.
+template<typename Member,
+         bool OnHeap = std::is_array_v<Member> && (sizeof(Member) > 4096)>
+class ConversionLocal {
+    Member value_;
+public:
+    Member& value() { return value_; }
+};
+
+template<typename Member>
+class ConversionLocal<Member, true> {
+    struct Box { Member value; };
+    std::unique_ptr<Box> box_ = std::make_unique_for_overwrite<Box>();
+public:
+    Member& value() { return box_->value; }
+};
+
+// An array whose elements are `const char*` or `std::string_view`. Reading
+// one is fine. Writing one would store pointers into strings the host
+// language owns and may free or reuse the moment the assignment returns, so
+// such a member is readable and not assignable.
+template<typename T>
+inline constexpr bool is_array_of_borrowed_text_v =
+    std::is_array_v<T> &&
+    (std::is_same_v<std::remove_cv_t<std::remove_all_extents_t<T>>, const char*> ||
+     std::is_same_v<std::remove_cv_t<std::remove_all_extents_t<T>>, std::string_view>);
 
 // Checks if a type is convertible by mirror_bridge
 template<typename T>
@@ -2227,12 +2275,21 @@ bool from_javascript(napi_env env, napi_value value, char (&buffer)[N]) {
     if (napi_typeof(env, value, &type) != napi_ok || type != napi_string) return false;
     size_t size = 0;
     if (napi_get_value_string_utf8(env, value, nullptr, 0, &size) != napi_ok) return false;
+    // Checked before anything is read: a string that is too long is never
+    // copied anywhere.
     if (size >= N) return false;
-    // N-API writes at most N - 1 bytes and a terminator, and the length was
-    // checked above, so this is the whole string. The tail is zeroed first so
-    // nothing of the previous value survives behind it.
-    std::memset(buffer, 0, N);
-    return napi_get_value_string_utf8(env, value, buffer, N, &size) == napi_ok;
+    // Read aside, because a string holding a NUL has to be refused and the
+    // buffer must be untouched when it is. N-API writes the text and a
+    // terminator, which is the room a std::string of that length has.
+    std::string text(size, '\0');
+    if (napi_get_value_string_utf8(env, value, text.data(), size + 1, &size) != napi_ok) {
+        return false;
+    }
+    if (core::text_fits_char_buffer(text.data(), size, N) != core::CharBufferFit::fits) {
+        return false;
+    }
+    core::copy_into_char_buffer(buffer, text.data(), size);
+    return true;
 }
 
 // Any other C array from an Array of exactly N elements, as std::array is.
@@ -3182,12 +3239,16 @@ napi_value js_setter(napi_env env, napi_callback_info info) {
     // constructor cannot even be converted into, because the setter needs a
     // local to move from. nlohmann::detail::dtoa_impl::diyfp is the real
     // second case and it took the whole of nlohmann-json down.
+    // The third shape is an array of `const char*` or std::string_view, which
+    // would keep pointers into strings JavaScript is free to collect.
     if constexpr (std::is_const_v<MemberType>
-                  || !std::is_default_constructible_v<MemberType>) {
+                  || !std::is_default_constructible_v<MemberType>
+                  || core::is_array_of_borrowed_text_v<MemberType>) {
         napi_throw_error(env, nullptr, "Property is not assignable from JavaScript");
         return nullptr;
     } else {
-    MemberType cpp_value;
+    core::ConversionLocal<MemberType> local;
+    MemberType& cpp_value = local.value();
     if (!from_javascript(env, args[0], cpp_value)) {
         using Member = std::remove_cvref_t<MemberType>;
         const char* expected = nullptr;
@@ -3202,10 +3263,19 @@ napi_value js_setter(napi_env env, napi_callback_info info) {
             if (napi_typeof(env, args[0], &type) == napi_ok && type == napi_string &&
                 napi_get_value_string_utf8(env, args[0], nullptr, 0, &size) == napi_ok) {
                 char message[256];
-                std::snprintf(message, sizeof message,
-                              "%s: a string of %zu bytes does not fit in char[%zu], which "
-                              "holds %zu and a terminator", member_name_sv.data(), size,
-                              std::extent_v<MemberType>, std::extent_v<MemberType> - 1);
+                if (size < std::extent_v<MemberType>) {
+                    // It fits, so what refused it was a NUL inside it.
+                    std::snprintf(message, sizeof message,
+                                  "%s: the string contains a NUL character, which would "
+                                  "end it early in char[%zu]", member_name_sv.data(),
+                                  std::extent_v<MemberType>);
+                } else {
+                    std::snprintf(message, sizeof message,
+                                  "%s: a string of %zu bytes does not fit in char[%zu], "
+                                  "which holds %zu and a terminator", member_name_sv.data(),
+                                  size, std::extent_v<MemberType>,
+                                  std::extent_v<MemberType> - 1);
+                }
                 napi_throw_range_error(env, nullptr, message);
                 return nullptr;
             }
@@ -3217,7 +3287,11 @@ napi_value js_setter(napi_env env, napi_callback_info info) {
     try {
         // Converted into a local first, so an Array that fails half way
         // through leaves the member as it was.
-        core::assign_member((*self).[:member:], cpp_value);
+        if constexpr (std::is_array_v<MemberType>) {
+            core::assign_array((*self).[:member:], cpp_value);
+        } else {
+            (*self).[:member:] = std::move(cpp_value);
+        }
     } catch (const std::exception& e) {
         napi_throw_error(env, nullptr, e.what());
         return nullptr;
@@ -3568,13 +3642,23 @@ struct JsConversionHelper {
                     return;
                 }
 
-                MemberType cpp_value;
-                if (!from_javascript(env, js_value, cpp_value)) {
+                if constexpr (core::is_array_of_borrowed_text_v<MemberType>) {
+                    // Readable, not assignable: see the trait.
                     success = false;
                     return;
-                }
+                } else {
+                    core::ConversionLocal<MemberType> local;
+                    if (!from_javascript(env, js_value, local.value())) {
+                        success = false;
+                        return;
+                    }
 
-                core::assign_member(out.[:member:], cpp_value);
+                    if constexpr (std::is_array_v<MemberType>) {
+                        core::assign_array(out.[:member:], local.value());
+                    } else {
+                        out.[:member:] = std::move(local.value());
+                    }
+                }
             }(), ...);
         }(std::make_index_sequence<member_count>{});
 

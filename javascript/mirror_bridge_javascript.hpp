@@ -480,12 +480,21 @@ bool from_javascript(napi_env env, napi_value value, char (&buffer)[N]) {
     if (napi_typeof(env, value, &type) != napi_ok || type != napi_string) return false;
     size_t size = 0;
     if (napi_get_value_string_utf8(env, value, nullptr, 0, &size) != napi_ok) return false;
+    // Checked before anything is read: a string that is too long is never
+    // copied anywhere.
     if (size >= N) return false;
-    // N-API writes at most N - 1 bytes and a terminator, and the length was
-    // checked above, so this is the whole string. The tail is zeroed first so
-    // nothing of the previous value survives behind it.
-    std::memset(buffer, 0, N);
-    return napi_get_value_string_utf8(env, value, buffer, N, &size) == napi_ok;
+    // Read aside, because a string holding a NUL has to be refused and the
+    // buffer must be untouched when it is. N-API writes the text and a
+    // terminator, which is the room a std::string of that length has.
+    std::string text(size, '\0');
+    if (napi_get_value_string_utf8(env, value, text.data(), size + 1, &size) != napi_ok) {
+        return false;
+    }
+    if (core::text_fits_char_buffer(text.data(), size, N) != core::CharBufferFit::fits) {
+        return false;
+    }
+    core::copy_into_char_buffer(buffer, text.data(), size);
+    return true;
 }
 
 // Any other C array from an Array of exactly N elements, as std::array is.
@@ -1435,12 +1444,16 @@ napi_value js_setter(napi_env env, napi_callback_info info) {
     // constructor cannot even be converted into, because the setter needs a
     // local to move from. nlohmann::detail::dtoa_impl::diyfp is the real
     // second case and it took the whole of nlohmann-json down.
+    // The third shape is an array of `const char*` or std::string_view, which
+    // would keep pointers into strings JavaScript is free to collect.
     if constexpr (std::is_const_v<MemberType>
-                  || !std::is_default_constructible_v<MemberType>) {
+                  || !std::is_default_constructible_v<MemberType>
+                  || core::is_array_of_borrowed_text_v<MemberType>) {
         napi_throw_error(env, nullptr, "Property is not assignable from JavaScript");
         return nullptr;
     } else {
-    MemberType cpp_value;
+    core::ConversionLocal<MemberType> local;
+    MemberType& cpp_value = local.value();
     if (!from_javascript(env, args[0], cpp_value)) {
         using Member = std::remove_cvref_t<MemberType>;
         const char* expected = nullptr;
@@ -1455,10 +1468,19 @@ napi_value js_setter(napi_env env, napi_callback_info info) {
             if (napi_typeof(env, args[0], &type) == napi_ok && type == napi_string &&
                 napi_get_value_string_utf8(env, args[0], nullptr, 0, &size) == napi_ok) {
                 char message[256];
-                std::snprintf(message, sizeof message,
-                              "%s: a string of %zu bytes does not fit in char[%zu], which "
-                              "holds %zu and a terminator", member_name_sv.data(), size,
-                              std::extent_v<MemberType>, std::extent_v<MemberType> - 1);
+                if (size < std::extent_v<MemberType>) {
+                    // It fits, so what refused it was a NUL inside it.
+                    std::snprintf(message, sizeof message,
+                                  "%s: the string contains a NUL character, which would "
+                                  "end it early in char[%zu]", member_name_sv.data(),
+                                  std::extent_v<MemberType>);
+                } else {
+                    std::snprintf(message, sizeof message,
+                                  "%s: a string of %zu bytes does not fit in char[%zu], "
+                                  "which holds %zu and a terminator", member_name_sv.data(),
+                                  size, std::extent_v<MemberType>,
+                                  std::extent_v<MemberType> - 1);
+                }
                 napi_throw_range_error(env, nullptr, message);
                 return nullptr;
             }
@@ -1470,7 +1492,11 @@ napi_value js_setter(napi_env env, napi_callback_info info) {
     try {
         // Converted into a local first, so an Array that fails half way
         // through leaves the member as it was.
-        core::assign_member((*self).[:member:], cpp_value);
+        if constexpr (std::is_array_v<MemberType>) {
+            core::assign_array((*self).[:member:], cpp_value);
+        } else {
+            (*self).[:member:] = std::move(cpp_value);
+        }
     } catch (const std::exception& e) {
         napi_throw_error(env, nullptr, e.what());
         return nullptr;
@@ -1821,13 +1847,23 @@ struct JsConversionHelper {
                     return;
                 }
 
-                MemberType cpp_value;
-                if (!from_javascript(env, js_value, cpp_value)) {
+                if constexpr (core::is_array_of_borrowed_text_v<MemberType>) {
+                    // Readable, not assignable: see the trait.
                     success = false;
                     return;
-                }
+                } else {
+                    core::ConversionLocal<MemberType> local;
+                    if (!from_javascript(env, js_value, local.value())) {
+                        success = false;
+                        return;
+                    }
 
-                core::assign_member(out.[:member:], cpp_value);
+                    if constexpr (std::is_array_v<MemberType>) {
+                        core::assign_array(out.[:member:], local.value());
+                    } else {
+                        out.[:member:] = std::move(local.value());
+                    }
+                }
             }(), ...);
         }(std::make_index_sequence<member_count>{});
 

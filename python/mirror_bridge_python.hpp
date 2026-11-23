@@ -1127,21 +1127,74 @@ PyObject* to_python(const char (&buffer)[N]) {
                                 "replace");
 }
 
-// A str that does not fit is a ValueError naming both sizes; see
-// core::fill_char_buffer for why it is never truncated.
+// Written from a str that fits with its terminator and holds no NUL of its
+// own; one that does not is a ValueError saying which, and is never cut
+// short (core::text_fits_char_buffer has the reasons).
+//
+// bytes are taken as they are, up to all N of them and with no terminator
+// required. That is the exact form: it is how pickling and copy.copy put
+// back a buffer that was full to the brim or held bytes that are not UTF-8,
+// neither of which survives the trip through a str, and it is there for a
+// caller who means the buffer as bytes.
 template<std::size_t N>
 bool from_python(PyObject* obj, char (&buffer)[N]) {
+    if (PyBytes_Check(obj)) {
+        const Py_ssize_t size = PyBytes_GET_SIZE(obj);
+        if (static_cast<std::size_t>(size) > N) {
+            PyErr_Format(PyExc_ValueError, "%zd bytes do not fit in char[%zu]", size, N);
+            return false;
+        }
+        core::copy_into_char_buffer(buffer, PyBytes_AS_STRING(obj),
+                                    static_cast<std::size_t>(size));
+        return true;
+    }
     if (!PyUnicode_Check(obj)) return false;
     Py_ssize_t size = 0;
     const char* utf8 = PyUnicode_AsUTF8AndSize(obj, &size);
     if (!utf8) return false;
-    if (!core::fill_char_buffer(buffer, utf8, static_cast<std::size_t>(size))) {
-        PyErr_Format(PyExc_ValueError,
-                     "a string of %zd bytes does not fit in char[%zu], which holds "
-                     "%zu and a terminator", size, N, N - 1);
-        return false;
+    switch (core::text_fits_char_buffer(utf8, static_cast<std::size_t>(size), N)) {
+        case core::CharBufferFit::too_long:
+            PyErr_Format(PyExc_ValueError,
+                         "a string of %zd bytes does not fit in char[%zu], which holds "
+                         "%zu and a terminator", size, N, N - 1);
+            return false;
+        case core::CharBufferFit::embedded_nul:
+            PyErr_Format(PyExc_ValueError,
+                         "the string contains a NUL character, which would end it "
+                         "early in char[%zu]; pass bytes to store it as it is", N);
+            return false;
+        case core::CharBufferFit::fits:
+            break;
     }
+    core::copy_into_char_buffer(buffer, utf8, static_cast<std::size_t>(size));
     return true;
+}
+
+// What pickling stores for a member: its ordinary conversion, except that a
+// char buffer goes as all N of its bytes. Read as a str it stops at the
+// first NUL and replaces what is not UTF-8, and a copy made from that is not
+// the same object: a brim-full buffer could not be restored at all, and one
+// with a stray byte came back longer than it left.
+template<typename Member>
+PyObject* member_state_to_python(const Member& member) {
+    if constexpr (core::is_char_buffer_v<Member>) {
+        return PyBytes_FromStringAndSize(member, std::extent_v<Member>);
+    } else if constexpr (std::is_array_v<Member>) {
+        constexpr std::size_t count = std::extent_v<Member>;
+        PyObject* list = PyList_New(static_cast<Py_ssize_t>(count));
+        if (!list) return nullptr;
+        for (std::size_t i = 0; i < count; ++i) {
+            PyObject* element = member_state_to_python(member[i]);
+            if (!element) {
+                Py_DECREF(list);
+                return nullptr;
+            }
+            PyList_SET_ITEM(list, static_cast<Py_ssize_t>(i), element);
+        }
+        return list;
+    } else {
+        return to_python(member);
+    }
 }
 
 template<typename T, std::size_t N>
@@ -4338,12 +4391,12 @@ int py_setter(PyObject* self, PyObject* value, void* closure) {
     } else if constexpr (std::is_array_v<MemberType>) {
         // An array cannot be assigned as a whole. Converted into a local
         // first, so a list that fails half way leaves the member as it was.
-        MemberType converted;
-        if (!from_python(value, converted)) {
+        core::ConversionLocal<MemberType> converted;
+        if (!from_python(value, converted.value())) {
             set_array_conversion_error();
             return -1;
         }
-        core::assign_member((*wrapper->cpp_object).[:member:], converted);
+        core::assign_array((*wrapper->cpp_object).[:member:], converted.value());
     } else {
         MemberType cpp_value;
         if (!from_python(value, cpp_value)) {
@@ -4436,12 +4489,12 @@ int py_visible_setter(PyObject* self, PyObject* value, void* closure) {
     } else if constexpr (std::is_array_v<MemberType>) {
         // An array cannot be assigned as a whole. Converted into a local
         // first, so a list that fails half way leaves the member as it was.
-        MemberType converted;
-        if (!from_python(value, converted)) {
+        core::ConversionLocal<MemberType> converted;
+        if (!from_python(value, converted.value())) {
             set_array_conversion_error();
             return -1;
         }
-        core::assign_member((*wrapper->cpp_object).[:member:], converted);
+        core::assign_array((*wrapper->cpp_object).[:member:], converted.value());
     } else if constexpr (!std::is_default_constructible_v<MemberType>) {
         // Registration points these at py_readonly_setter, so this is
         // unreachable; it exists so the template still instantiates, as the
@@ -5606,8 +5659,12 @@ template<typename T, std::size_t VisibleIndex>
 consteval bool is_visible_member_unassignable() {
     using MemberType =
         typename [:std::meta::type_of(get_visible_member_info<T, VisibleIndex>()):];
-    if constexpr (std::is_array_v<MemberType>) {
-        // from_python writes into an array in place, so it never needs one.
+    if constexpr (core::is_array_of_borrowed_text_v<MemberType>) {
+        // `const char* names[4]`: assigning would store pointers into Python
+        // strings that may be gone by the next statement.
+        return true;
+    } else if constexpr (std::is_array_v<MemberType>) {
+        // An array is filled element by element, so it never needs one.
         return false;
     } else if constexpr (!requires { sizeof(MemberType); }) {
         // is_default_constructible_v on an incomplete type is undefined
@@ -6249,7 +6306,7 @@ PyObject* py_member_state(PyObject* self) {
             if (!ok) return;
             constexpr auto member = annotations::get_visible_member<T>(Is);
             constexpr const char* member_name = std::meta::identifier_of(member).data();
-            PyObject* value = to_python((*wrapper->cpp_object).[:member:]);
+            PyObject* value = member_state_to_python((*wrapper->cpp_object).[:member:]);
             if (!value) {
                 if (!PyErr_Occurred()) {
                     PyErr_Format(PyExc_TypeError,
@@ -6914,7 +6971,10 @@ struct ConversionOverloadGenerator {
                     return;
                 }
 
-                if constexpr (std::is_array_v<MemberType>) {
+                if constexpr (core::is_array_of_borrowed_text_v<MemberType>) {
+                    // Readable, not assignable: see the trait.
+                    success = false;
+                } else if constexpr (std::is_array_v<MemberType>) {
                     // Array: fill in-place via from_python overload for T[N]
                     if (!from_python(py_value, out.[:member:])) {
                         success = false;

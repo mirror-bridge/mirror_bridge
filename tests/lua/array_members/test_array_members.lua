@@ -59,4 +59,24 @@ local ok5 = pcall(function() grid.rows = {"q", "eight888"} end)
 assert(not ok5 and grid.rows[1] == "x", "a row that does not fit refuses the whole assignment")
 print("  ok  nested arrays, of numbers and of char buffers")
 
+local ok6, err6 = pcall(function() label.name = "ab\0cd" end)
+assert(not ok6 and tostring(err6):find("NUL"), "a string with a NUL inside is refused by name: " .. tostring(err6))
+print("  ok  an embedded NUL is refused, not stored and read back short")
+
+local huge = m.Huge()
+local samples = {}
+for i = 1, 1500000 do samples[i] = 1.5 end
+huge.samples = samples
+assert(huge:last() == 1.5, "a member too large for the stack is assigned")
+assert(not pcall(function() huge.samples = {1.0, 2.0} end))
+assert(huge:last() == 1.5)
+print("  ok  twelve megabytes written without overflowing the stack")
+
+local names = m.Names()
+assert(names.names[1] == "first" and names.names[2] == "second")
+assert(not pcall(function() names.names = {"a", "b"} end),
+       "an array of const char* must not keep pointers into Lua strings")
+assert(names.names[1] == "first")
+print("  ok  an array of const char* reads and refuses assignment")
+
 print("PASS: C array members (Lua)")

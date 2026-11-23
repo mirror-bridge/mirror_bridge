@@ -8,4 +8,6 @@ MIRROR_BRIDGE_LUA_MODULE(array_members_lua,
     mirror_bridge::lua::bind_class<arr::Brimful>(L, "Brimful");
     mirror_bridge::lua::bind_class<arr::Tint>(L, "Tint");
     mirror_bridge::lua::bind_class<arr::Grid>(L, "Grid");
+    mirror_bridge::lua::bind_class<arr::Huge>(L, "Huge");
+    mirror_bridge::lua::bind_class<arr::Names>(L, "Names");
 )

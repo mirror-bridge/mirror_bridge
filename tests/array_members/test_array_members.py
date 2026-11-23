@@ -57,16 +57,37 @@ label.name = ""
 assert label.name == "" and label.length() == 0
 print("  ✓ the tail is zeroed")
 
-print("Test 6: only a str is accepted...")
-for bad in (5, None, ["a", "b"], b"bytes"):
+print("Test 6: nothing else is taken for text, and a NUL inside a str is refused...")
+for bad in (5, None, ["a", "b"]):
     try:
         label.name = bad
     except TypeError:
         pass
     else:
         raise AssertionError("char[16] accepted %r" % (bad,))
+# Stored whole it would read back as "ab": a truncation by another road.
+try:
+    label.name = "ab\0cd"
+except ValueError as e:
+    assert "NUL" in str(e), str(e)
+else:
+    raise AssertionError("a str with a NUL inside it was accepted")
 assert label.name == ""
-print("  ✓ int, None, list and bytes are TypeErrors")
+print("  ✓ int, None and list are TypeErrors; an embedded NUL is a ValueError")
+
+print("Test 6b: bytes are stored as they are, up to the whole buffer...")
+label.name = b"raw"
+assert label.name == "raw" and label.tail_is_clear()
+label.name = b"0123456789abcdef"            # all sixteen, no terminator
+assert label.name == "0123456789abcdef"
+try:
+    label.name = b"0123456789abcdefg"
+except ValueError as e:
+    assert "char[16]" in str(e), str(e)
+else:
+    raise AssertionError("seventeen bytes were accepted by char[16]")
+label.name = ""
+print("  ✓ three bytes, exactly sixteen, and seventeen refused")
 
 print("Test 7: a buffer with no terminator is read to its end and no further...")
 assert m.Brimful().tag == "abcd", repr(m.Brimful().tag)
@@ -123,12 +144,50 @@ assert not hasattr(m.Constants, "shared")
 assert m.Constants().value == 1
 print("  ✓ the int* static is absent, the class and its other statics are not")
 
-print("Test 13: a char buffer survives pickling...")
+print("Test 13: a char buffer survives pickling and copying, byte for byte...")
+import copy as copylib
+
 label = m.Label()
 label.name = "pickled"
 label.id = 3
-copy = pickle.loads(pickle.dumps(label))
-assert copy.name == "pickled" and copy.id == 3, (copy.name, copy.id)
-print("  ✓ round trip")
+clone = pickle.loads(pickle.dumps(label))
+assert clone.name == "pickled" and clone.id == 3, (clone.name, clone.id)
+# The two that a trip through str cannot make: a buffer with no room for a
+# terminator, and bytes that are not UTF-8.
+brim = m.Brimful()
+assert copylib.copy(brim).tag == "abcd"
+assert pickle.loads(pickle.dumps(brim)).tag == "abcd"
+bent = m.Label()
+bent.corrupt()
+assert copylib.copy(bent).length() == bent.length() == 2, copylib.copy(bent).length()
+grid = m.Grid()
+grid.rows = ["x", "seven77"]
+assert pickle.loads(pickle.dumps(grid)).rows == ["x", "seven77"]
+print("  ✓ plain, brim-full, not UTF-8, and nested")
+
+print("Test 14: a member too large for the stack is assigned without crashing...")
+huge = m.Huge()
+huge.samples = [1.5] * 1500000
+assert huge.last() == 1.5
+try:
+    huge.samples = [1.0, 2.0]
+except TypeError:
+    pass
+else:
+    raise AssertionError("double[1500000] accepted two elements")
+assert huge.last() == 1.5
+print("  ✓ twelve megabytes written, a wrong length refused")
+
+print("Test 15: an array of const char* reads, and refuses assignment...")
+names = m.Names()
+assert names.names == ["first", "second"], names.names
+try:
+    names.names = ["a", "b"]
+except (AttributeError, TypeError):
+    pass
+else:
+    raise AssertionError("const char*[2] accepted pointers into Python strings")
+assert names.names == ["first", "second"]
+print("  ✓ readable, not assignable")
 
 print("\nAll array-member tests passed!")
