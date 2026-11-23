@@ -297,6 +297,14 @@ if(MIRROR_BRIDGE_BUILD_PYTHON)
         )
     endif()
 
+    # A pointer an instance method returns is borrowed, not refused
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/borrowed_returns)
+        mirror_bridge_python_module(borrowed_returns
+            borrowed_returns/borrowed_returns_binding.cpp
+            INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/borrowed_returns
+        )
+    endif()
+
     # A std::vector data member is a live view of the C++ vector, not a copy
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/sequence_views)
         mirror_bridge_python_module(sequence_views

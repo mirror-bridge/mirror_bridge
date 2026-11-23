@@ -48,12 +48,15 @@
       "shape": "oo",
       "build": "clang++ -std=c++17 -stdlib=libc++ -O1 -fPIC -I@CHECKOUT@ -c @CHECKOUT@/tinyxml2.cpp -o @BUILD@/tinyxml2.o",
       "link_args": "@BUILD@/tinyxml2.o",
-      "expect": "partial",
+      "expect": "bind",
       "must_export": [
         "XMLDocument",
-        "XMLElement"
+        "XMLElement",
+        "XMLDocument.RootElement",
+        "XMLElement.FirstChildElement",
+        "XMLElement.Attribute"
       ],
-      "note": "XMLElement and the whole XMLNode hierarchy are missing: you can load a document and not walk it. Meanwhile MemPoolT_104 and DynArray_anon_10 bind."
+      "note": "A document can be parsed and walked: RootElement, FirstChildElement and NextSiblingElement hand back borrowed elements. It cannot yet be built, because InsertEndChild takes a pointer parameter and those are not bound."
     },
     {
       "name": "pugixml",
@@ -295,9 +298,11 @@
       "expect": "partial",
       "must_export": [
         "b2World",
-        "b2Body"
+        "b2Body",
+        "b2World.CreateBody",
+        "b2Body.CreateFixture"
       ],
-      "note": "b2World binds but b2Body does not, so a world can be created and nothing can move in it. ~b2Body() is private -- b2World is its only friend."
+      "note": "b2World and b2Body both bind, and a body is still unobtainable: CreateBody and CreateFixture take pointer parameters, which are not bound, so a world can be created and nothing can be put in it."
     },
     {
       "name": "simdjson",

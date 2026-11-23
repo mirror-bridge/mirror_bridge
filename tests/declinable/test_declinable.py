@@ -5,7 +5,8 @@ Every shape here came from a real library in the compatibility corpus, where
 one of them took every other class down with it:
 
   Undestroyable  tinyxml2::XMLElement -- private destructor, so no wrapper
-                 can free it. Cost the module all 15 classes.
+                 can free it. Cost the module all 15 classes. It binds now, as
+                 a class that is only ever borrowed (tests/borrowed_returns).
   Unfillable     Json::Value -- looks like a container (value_type, begin(),
                  size()) and nothing can be put into it. A static_assert deep
                  in the conversion layer cost jsoncpp all 23 classes, for one
@@ -34,11 +35,20 @@ p.x = 3.0
 assert p.twice() == 6.0
 print("  ✓ Plain binds and works")
 
-print("Test 3: a class whose destructor is inaccessible is skipped...")
-# Skipped, not bound-and-broken: a wrapper that cannot free its object would
-# leak or crash on collection.
-assert not hasattr(d, "Undestroyable"), "Undestroyable should have been declined"
-print("  ✓ declined, and the module still built")
+print("Test 3: a class whose destructor is inaccessible binds, and cannot be built...")
+# Bound, because the library hands these out by pointer and a wrapper that
+# only borrows one never needs to free it. Not constructible, because a
+# wrapper that built one could never free it. Its static `make()` returns a
+# pointer with no receiver to borrow from, so that stays unbound.
+assert hasattr(d, "Undestroyable"), "Undestroyable should bind as borrow-only"
+try:
+    d.Undestroyable()
+except TypeError as e:
+    assert "destructor is not accessible" in str(e), str(e)
+else:
+    raise AssertionError("built an object nothing could free")
+assert not hasattr(d.Undestroyable, "make")
+print("  ✓ bound, construction refused, and the module still built")
 
 print("Test 4: a class keeps the methods that do convert...")
 c = d.Consumer()

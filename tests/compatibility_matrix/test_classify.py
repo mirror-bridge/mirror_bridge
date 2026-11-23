@@ -56,6 +56,64 @@ class TestUsabilityBar(unittest.TestCase):
         self.assertEqual(v["status"], "token-binding")
 
 
+class TestMemberBar(unittest.TestCase):
+    """A class in the module is not a class a caller can get hold of.
+
+    box2d's b2Body binds once a class with a private destructor may, and is
+    still unobtainable while b2World.CreateBody is not bound. Judged by class
+    names alone the row would have flipped to "binds" for a world nothing can
+    be put in.
+    """
+
+    def test_a_missing_member_keeps_the_row_partial(self):
+        v = rc.classify_exports(
+            ["b2World", "b2Body", "b2World.CreateBody"],
+            ["b2Body", "b2World"],
+            ["b2World.Step", "b2World.GetBodyList", "b2Body.GetPosition"])
+        self.assertEqual(v["status"], "partial-binding")
+        self.assertEqual(v["must_export_missing"], ["b2World.CreateBody"])
+
+    def test_a_present_member_counts(self):
+        v = rc.classify_exports(
+            ["XMLDocument", "XMLDocument.RootElement"],
+            ["XMLDocument", "XMLElement"],
+            ["XMLDocument.RootElement", "XMLDocument.Parse"])
+        self.assertEqual(v["status"], "ok")
+
+    def test_a_member_is_not_satisfied_by_another_class_having_it(self):
+        v = rc.classify_exports(["b2World.CreateBody"], ["b2World", "b2Other"],
+                                ["b2Other.CreateBody"])
+        self.assertEqual(v["must_export_missing"], ["b2World.CreateBody"])
+
+    def test_the_members_of_a_generated_cs(self):
+        cs = "\n".join([
+            "public sealed class Savepoint : IDisposable, IMbOwner {",
+            "    public sealed class SavepointHandle : SafeHandle {",
+            "        public SavepointHandle() : base(IntPtr.Zero, true) {}",
+            "    }",
+            "    public void Dispose() {",
+            "    public void rollbackTo() {",
+            "    public static int count() {",
+            "    public Savepoint(Database aDatabase, string aName) {",
+            "    public int Value => mb_get(handle);",
+            "}",
+            "public sealed class Database : IDisposable, IMbOwner {",
+            "    public MbMap<string, int> stats(int depth) {",
+            "internal static class Native {",
+            "    public static int helper() {",
+        ])
+        got = rc.csharp_members(cs)
+        self.assertIn("Savepoint.rollbackTo", got)
+        self.assertIn("Savepoint.count", got)
+        self.assertIn("Database.stats", got)
+        # A method belongs to the class it sits in, and a property is not one.
+        self.assertNotIn("Database.rollbackTo", got)
+        self.assertNotIn("Savepoint.Value", got)
+        self.assertNotIn("SavepointHandle.SavepointHandle", got)
+        # A class that is not public ends the one before it and owns nothing.
+        self.assertNotIn("Database.helper", got)
+
+
 class TestWorkDirLock(unittest.TestCase):
     """Two runs sharing a --work-dir must refuse, not corrupt.
 

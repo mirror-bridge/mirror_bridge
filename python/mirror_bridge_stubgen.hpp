@@ -716,6 +716,13 @@ std::string type_hint() {
         return "str";
     } else if constexpr (std::is_void_v<CleanT>) {
         return "None";
+    } else if constexpr (std::is_pointer_v<CleanT>) {
+        // The only other pointer that gets bound is a pointer to a class
+        // returned by an instance method, which crosses as a borrow of that
+        // class and as None when it is null. Saying so matters to a
+        // caller: `doc.RootElement().Name()` on an empty document is the bug
+        // a type checker can catch only if the stub admits the None.
+        return type_hint<std::remove_cv_t<std::remove_pointer_t<CleanT>>, P>() + " | None";
     }
 
     // Eigen fixed-size vectors/matrices convert to (nested) Python lists.

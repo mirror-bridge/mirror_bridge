@@ -15,7 +15,7 @@ struct Plain {
 };
 
 // tinyxml2::XMLElement: the library deliberately makes it undestroyable from
-// outside, so no wrapper can free it.
+// outside, so no wrapper can free it. It can still be borrowed.
 class Undestroyable {
 public:
     int value = 7;

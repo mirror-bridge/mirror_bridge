@@ -207,6 +207,7 @@ See [the CLI reference](docs/reference/cli.md#csharp-output).
 | **Inheritance** | ✅ | ✅ | ✅ | ✅ |
 | **Method Overloading** | ✅ | ⚠️ | ⚠️ | ✅ |
 | **Smart Pointers** | ⚠️ | ⚠️ | ⚠️ | ❌ |
+| **Borrowed pointer returns** | ✅ | ❌ | ❌ | ✅ |
 | **Exception Handling** | ✅ | ✅ | ✅ | ✅ |
 | **Cross-Module Types** | ✅ | ❌ | ❌ | ❌ |
 | **Zero-Copy Buffers** | ✅ | ❌ | ❌ | ❌ |
@@ -291,6 +292,16 @@ that way — abstract, or with no default constructor — converts only from
 `nil`/`null`, and anything else is refused rather than handed to C++ as a null
 pointer. Tracked in
 [#54](https://github.com/FranciscoThiesen/mirror_bridge/issues/54).
+
+✅ **Borrowed pointer returns**: a `T*` returned by an instance method is the
+library's own object, not a copy. The wrapper frees nothing and keeps the
+owner alive, so `doc.RootElement().FirstChildElement("body")` works and stays
+valid for as long as you hold it; a null pointer is `None`. A class with a
+private destructor, which is how a factory-style library says "we free these",
+binds as a class you can only be handed. `const T*` returns and pointer
+*parameters* are not bound yet, and what a borrow has to assume about lifetime
+is spelled out in
+[the type reference](docs/reference/type-conversion.md#pointer-returns-python).
 
 ✅ **Constructors**: Lua's `Cls(...)`, `Cls:new(...)` and `Cls.new(...)` and
 JavaScript's `new Cls(...)` call the constructor whose parameters the
