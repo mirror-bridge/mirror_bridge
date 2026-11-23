@@ -347,6 +347,14 @@ if(MIRROR_BRIDGE_BUILD_PYTHON)
         )
     endif()
 
+    # A data member with no conversion is left out; its class still binds
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/declined_members)
+        mirror_bridge_python_module(declined_members
+            declined_members/declined_members_binding.cpp
+            INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/declined_members
+        )
+    endif()
+
     # C array members: a char buffer is a str, any other array a list
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/array_members)
         mirror_bridge_python_module(array_members
@@ -445,6 +453,15 @@ if(MIRROR_BRIDGE_BUILD_LUA AND LUA_FOUND)
         set_target_properties(type_safety_lua PROPERTIES OUTPUT_NAME type_safety)
     endif()
 
+    # A data member with no conversion is left out; its class still binds
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/lua/declined_members)
+        mirror_bridge_lua_module(declined_members_lua
+            lua/declined_members/declined_members_lua_binding.cpp
+            INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/lua/declined_members
+            OUTPUT_DIRECTORY ${LUA_TEST_OUTPUT_DIR}
+        )
+    endif()
+
     # C array members: a char buffer is a string, any other array a table
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/lua/array_members)
         mirror_bridge_lua_module(array_members_lua
@@ -536,6 +553,14 @@ if(MIRROR_BRIDGE_BUILD_JS AND NAPI_FOUND)
             target_link_options(foreign_addon PRIVATE -Wl,-undefined,dynamic_lookup)
         endif()
         add_dependencies(type_safety_js foreign_addon)
+    endif()
+
+    # Declined members (the JavaScript half of lua/declined_members)
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/js/declined_members)
+        mirror_bridge_js_module(declined_members_js
+            js/declined_members/declined_members_js_binding.cpp
+            INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/js/declined_members
+        )
     endif()
 
     # C array members (the JavaScript half of lua/array_members)

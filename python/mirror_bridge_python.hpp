@@ -2062,12 +2062,12 @@ consteval bool returns_borrowable_pointer() {
         } else if constexpr (!NestedBindable<Pointee>) {
             return false;
         } else {
-            // The pointee has to be a class bind_class would accept, since a
-            // borrow is only ever a wrapper of a bound class. Whether a
-            // module actually binds it is a runtime fact and is checked
-            // there; what can be known here is that `FILE*`, or a pointer to
-            // a struct full of raw pointers, never will be.
-            return mirror_bridge::core::validate_bindable_members<Pointee>();
+            // A borrow is only ever a wrapper of a bound class, and whether
+            // a module binds this one is a runtime fact, checked at the
+            // call. This used to ask that every member of the pointee
+            // convert, because a class with one that did not could never be
+            // bound. It can now: the member is what is left out.
+            return true;
         }
     }
 }
@@ -2839,8 +2839,12 @@ struct DataMemberCache {
                     }
                     if (hidden) continue;
 
-                    result.push_back(f);
+                    // A member with no conversion is left out, as it is from
+                    // core::CarriedDataMembers. Its name is still recorded so
+                    // that it goes on hiding a base's member of the same
+                    // name, the way it does in C++.
                     layer_names.push_back(name);
+                    if (core::data_member_converts(f)) result.push_back(f);
                 }
                 for (auto b : std::meta::bases_of(cls, ctx)) {
                     auto base_type = std::meta::type_of(b);
@@ -5003,11 +5007,7 @@ consteval bool is_const_twin_of_bound_method() {
 // methods. The CLI sets it for its own verification import, so the tool and
 // anything driving it sees them while a user's program stays quiet.
 inline bool report_declined_methods() {
-    static const bool on = [] {
-        const char* v = std::getenv("MIRROR_BRIDGE_REPORT_DECLINED");
-        return v && v[0] && v[0] != '0';
-    }();
-    return on;
+    return core::declined_report_requested();
 }
 
 // Why method_fully_bindable said no. The four arms are the same four, in
@@ -7839,6 +7839,11 @@ struct AutoTrampolineSlots {
     destructor tp_dealloc = nullptr;
 };
 
+template<Bindable T, typename Trampoline>
+BoundClass<T> bind_class_impl(PyObject* module, const char* name,
+                              const char* file_hash = nullptr,
+                              const AutoTrampolineSlots* autos = nullptr);
+
 // Main binding function — generates Python type object for a C++ class.
 //
 // Takes an optional `Trampoline` template parameter (defaulting to T). When
@@ -7850,14 +7855,46 @@ template<Bindable T, typename Trampoline = T>
 BoundClass<T> bind_class(PyObject* module, const char* name,
                          const char* file_hash = nullptr,
                          const AutoTrampolineSlots* autos = nullptr) {
+    // A member with no conversion is left out of the class. Someone who
+    // names a class by hand and would get fewer attributes than the struct
+    // has should hear that from the compiler, so here it is an error unless
+    // the member is marked. bind_class_when_bindable, which is what
+    // `mirror_bridge generate` emits, leaves it out and says so instead:
+    // nobody can annotate a third-party header.
+    static_assert(annotations::count_declined_members<T>() == 0,
+        "bind_class<T>: T has a data member whose type mirror_bridge cannot convert. "
+        "Mark it [[=exclude{}]], add a custom type converter, or bind the class with "
+        "bind_class_when_bindable<T>, which leaves such a member out and binds the rest. "
+        "Supported: arithmetic, std::string, containers, smart pointers, "
+        "std::optional, std::expected, enums, C arrays and nested bindable classes.");
+    return bind_class_impl<T, Trampoline>(module, name, file_hash, autos);
+}
+
+// The binder itself. bind_class and bind_class_when_bindable differ only in
+// what they do about a member with no conversion, and both end here.
+template<Bindable T, typename Trampoline>
+BoundClass<T> bind_class_impl(PyObject* module, const char* name,
+                              const char* file_hash,
+                              const AutoTrampolineSlots* autos) {
     static_assert(std::is_base_of_v<T, Trampoline> || std::is_same_v<T, Trampoline>,
         "Trampoline must derive from T (or be T itself)");
-    // Compile-time validation: ensure all member types are convertible
-    static_assert(core::validate_bindable_members<T>(),
-        "bind_class<T>: T contains members with types that mirror_bridge cannot convert. "
-        "Mark unconvertible members with [[=exclude{}]] or add a custom type converter. "
-        "Supported: arithmetic, std::string, containers, smart pointers, "
-        "std::optional, std::expected, enums, and nested bindable classes.");
+
+    // Named when asked, on the same terms and in the same shape as a
+    // declined method, so the CLI reads both with one parser.
+    constexpr std::size_t declined_member_count = annotations::count_declined_members<T>();
+    if constexpr (declined_member_count > 0) {
+        if (report_declined_methods()) {
+            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                ([&] {
+                    constexpr const char* declined_member =
+                        annotations::get_declined_member_name<T, Is>();
+                    std::fprintf(stderr,
+                        "mirror_bridge: skipped member '%s::%s' (its type has no conversion)\n",
+                        name, declined_member);
+                }(), ...);
+            }(std::make_index_sequence<declined_member_count>{});
+        }
+    }
 
     // Generate type signature for hash-based change detection
     auto signature = generate_type_signature<T>(file_hash);
@@ -8246,13 +8283,8 @@ BoundClass<T> bind_class_when_bindable(PyObject* module, const char* name) {
             "mirror_bridge: skipped '%s' (not bindable: no reflectable "
             "members/methods)\n", name);
         return {nullptr};
-    } else if constexpr (!core::validate_bindable_members<T>()) {
-        std::fprintf(stderr,
-            "mirror_bridge: skipped '%s' (a member type has no converter; "
-            "mark it [[=exclude{}]] or add a custom converter)\n", name);
-        return {nullptr};
     } else {
-        return bind_class<T, Trampoline>(module, name);
+        return bind_class_impl<T, Trampoline>(module, name);
     }
 }
 

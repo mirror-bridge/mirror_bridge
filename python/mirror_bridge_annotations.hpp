@@ -27,6 +27,8 @@
 #include <vector>
 #include <type_traits>
 
+#include "core/mirror_bridge_core.hpp"
+
 namespace mirror_bridge {
 
 // ============================================================================
@@ -115,31 +117,61 @@ consteval bool is_readonly() {
     return has_annotation<readonly>(Member);
 }
 
-// Count the number of non-excluded data members for a type
+// The members Python sees: named, not marked [[=exclude{}]], and of a type
+// with a conversion. The last is the same test core::CarriedDataMembers
+// applies, so a member with no conversion is left out here exactly as if it
+// had been annotated, which is what the annotation was always documented to
+// be the remedy for.
+//
+// Built once per class. Every getter, setter, repr and pickle site asks for
+// a member by index, and each of those used to walk the whole class again.
+template<typename T>
+struct VisibleMembers {
+    static consteval std::vector<std::meta::info> collect() {
+        std::vector<std::meta::info> out;
+        for (auto member : named_members_of<T>()) {
+            if (has_annotation<exclude>(member)) continue;
+            if (!core::data_member_converts(member)) continue;
+            out.push_back(member);
+        }
+        return out;
+    }
+    static constexpr auto members = std::define_static_array(collect());
+};
+
 template<typename T>
 consteval std::size_t count_visible_members() {
-    std::size_t count = 0;
-    for (auto member : named_members_of<T>()) {
-        if (!has_annotation<exclude>(member)) ++count;
-    }
-    return count;
+    return VisibleMembers<T>::members.size();
 }
 
-// Get the Nth visible (non-excluded) member
 template<typename T>
 consteval std::meta::info get_visible_member(std::size_t visible_index) {
-    auto members = named_members_of<T>();
-    std::size_t visible_count = 0;
-    for (auto member : members) {
-        if (!has_annotation<exclude>(member)) {
-            if (visible_count == visible_index) {
-                return member;
-            }
-            ++visible_count;
+    return VisibleMembers<T>::members[visible_index];
+}
+
+// The members left out for want of a conversion that nobody asked to have
+// left out. These are the ones worth telling the caller about, and the ones
+// a hand-written bind_class refuses to drop in silence.
+template<typename T>
+struct UnexpectedlyDeclinedMembers {
+    static consteval std::vector<std::meta::info> collect() {
+        std::vector<std::meta::info> out;
+        for (auto member : core::DeclinedDataMembers<T>::members) {
+            if (!has_annotation<exclude>(member)) out.push_back(member);
         }
+        return out;
     }
-    // Should not reach here if visible_index is valid
-    return members[0];
+    static constexpr auto members = std::define_static_array(collect());
+};
+
+template<typename T>
+consteval std::size_t count_declined_members() {
+    return UnexpectedlyDeclinedMembers<T>::members.size();
+}
+
+template<typename T, std::size_t Index>
+consteval const char* get_declined_member_name() {
+    return std::meta::identifier_of(UnexpectedlyDeclinedMembers<T>::members[Index]).data();
 }
 
 // Check if the Nth visible member is readonly

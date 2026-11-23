@@ -18,6 +18,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -227,14 +228,112 @@ consteval std::vector<std::meta::info> named_data_members() {
     return out;
 }
 
+// Whether a backend can carry a data member of this type at all.
+//
+// Asked of a reflection and not of a type, because every caller is a loop
+// over members_of, where no member is a constant that could be spliced into
+// is_convertible_type<...>. substitute names the variable template's
+// specialization for the member's type and extract reads it, which is the
+// same question put indirectly.
+template<typename T>
+consteval bool is_convertible_type();
+
+template<typename T>
+inline constexpr bool is_convertible_type_v = is_convertible_type<T>();
+
+consteval bool data_member_converts(std::meta::info member) {
+    return std::meta::extract<bool>(std::meta::substitute(
+        ^^is_convertible_type_v, {std::meta::remove_cvref(std::meta::type_of(member))}));
+}
+
+// The members a binding carries: named, and of a type with a conversion.
+//
+// One member with no conversion used to cost the whole class. Under auto
+// discovery the class was skipped by name, and with it every method it has:
+// ImGuiIO, ImDrawList and seventeen more of Dear ImGui's forty-three classes,
+// box2d's b2FixtureDef and b2JointDef, each over a single raw pointer field
+// beside dozens of plain ones. A hand-written bind_class was a static_assert
+// whose advice, to mark the member [[=exclude{}]], did not work either,
+// because the assertion never looked at the annotation.
+//
+// The member is now what is left out. Filtering here, at the one list every
+// accessor below reads, is what makes that true for the getter, the setter,
+// the repr, table and object conversion and the stub at once, in every
+// backend, instead of at each of those sites separately. The list is built
+// once per class and kept, since each of those sites asks for it by index.
+template<typename T>
+struct CarriedDataMembers {
+    static consteval std::vector<std::meta::info> collect() {
+        std::vector<std::meta::info> out;
+        for (auto m : named_data_members<T>()) {
+            if (data_member_converts(m)) out.push_back(m);
+        }
+        return out;
+    }
+    static constexpr auto members = std::define_static_array(collect());
+};
+
 template<typename T, std::size_t I>
 consteval auto get_data_member() {
-    return named_data_members<T>()[I];
+    return CarriedDataMembers<T>::members[I];
 }
 
 template<typename T>
 consteval std::size_t get_data_member_count() {
-    return named_data_members<T>().size();
+    return CarriedDataMembers<T>::members.size();
+}
+
+// The members left out for want of a conversion, for a backend to name.
+template<typename T>
+struct DeclinedDataMembers {
+    static consteval std::vector<std::meta::info> collect() {
+        std::vector<std::meta::info> out;
+        for (auto m : named_data_members<T>()) {
+            if (!data_member_converts(m)) out.push_back(m);
+        }
+        return out;
+    }
+    static constexpr auto members = std::define_static_array(collect());
+};
+
+template<typename T>
+consteval std::size_t get_declined_data_member_count() {
+    return DeclinedDataMembers<T>::members.size();
+}
+
+template<typename T, std::size_t I>
+consteval const char* get_declined_data_member_name() {
+    return std::meta::identifier_of(DeclinedDataMembers<T>::members[I]).data();
+}
+
+// Whether the module should name what it left out. Off unless asked: this
+// runs when a module loads, and a large library declines hundreds of names,
+// so a program importing it would print the whole list every time. The CLI
+// sets it for its own verification import.
+inline bool declined_report_requested() {
+    static const bool requested = [] {
+        const char* v = std::getenv("MIRROR_BRIDGE_REPORT_DECLINED");
+        return v && *v && *v != '0';
+    }();
+    return requested;
+}
+
+// One line per member left out, in the shape the CLI already parses for a
+// declined method.
+template<typename T>
+void report_declined_data_members(const char* class_name) {
+    constexpr std::size_t count = get_declined_data_member_count<T>();
+    if constexpr (count > 0) {
+        if (!declined_report_requested()) return;
+        [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            ([&] {
+                constexpr const char* member = get_declined_data_member_name<T, Is>();
+                std::fprintf(stderr,
+                    "mirror_bridge: skipped member '%s::%s' (its type has no conversion)\n",
+                    class_name, member);
+            }(), ...);
+        }(std::make_index_sequence<count>{});
+    }
 }
 
 // The same list, plus the members every base class contributes.
@@ -276,14 +375,17 @@ consteval std::vector<std::meta::info> data_members_with_bases() {
                 if (!std::meta::has_identifier(m)) continue;
                 const auto name = std::meta::identifier_of(m);
                 if (already(name)) continue;
+                // Recorded as seen whether or not it converts: a base member
+                // left out must still hide the same name further up, as it
+                // does in C++.
                 seen.push_back(name);
-                out.push_back(m);
+                if (data_member_converts(m)) out.push_back(m);
             }
         }
     };
     walk(walk, ^^T);
 
-    for (auto m : named_data_members<T>()) out.push_back(m);
+    for (auto m : CarriedDataMembers<T>::members) out.push_back(m);
     return out;
 }
 
@@ -1537,7 +1639,14 @@ consteval bool is_convertible_type() {
     } else if constexpr (is_smart_pointer<U>::value) {
         return true;
     } else if constexpr (is_container<U>::value) {
-        return true;
+        // A container converts when what it holds does. For a standard one
+        // the raw-pointer walk at the top has already looked through its
+        // template arguments. A container of the library's own is only
+        // recognisable as one here, by its value_type: Dear ImGui's
+        // ImVector<ImFont*> is not in std, so that walk rightly leaves its
+        // arguments alone, and it then reached the element conversion with a
+        // pointer nothing converts.
+        return !carries_raw_pointer<typename U::value_type>();
     } else if constexpr (Bindable<U>) {
         return true;
     } else {
@@ -1545,25 +1654,14 @@ consteval bool is_convertible_type() {
     }
 }
 
-// Validates a single data member at index I of class T
-template<Bindable T, std::size_t I>
-consteval bool validate_member_at_index() {
-    constexpr auto member = get_data_member<T, I>();
-    using MemberType = std::remove_cvref_t<typename [:std::meta::type_of(member):]>;
-    return is_convertible_type<MemberType>();
-}
-
-// Validates all data members of a Bindable class using index_sequence.
-// Returns true if every data member type is convertible by mirror_bridge.
-template<Bindable T, std::size_t... Is>
-consteval bool validate_members_impl(std::index_sequence<Is...>) {
-    return (validate_member_at_index<T, Is>() && ...);
-}
-
+// Whether every named data member has a conversion. A binding no longer
+// needs this to be true: a member that fails it is left out and named. It is
+// what a hand-written bind_class still asserts, because someone who lists a
+// class by hand and gets fewer attributes than the struct has should hear
+// about it from the compiler.
 template<Bindable T>
 consteval bool validate_bindable_members() {
-    constexpr std::size_t count = get_data_member_count<T>();
-    return validate_members_impl<T>(std::make_index_sequence<count>{});
+    return get_declined_data_member_count<T>() == 0;
 }
 
 // Convenience macro — place in bind_class or module definition to get a

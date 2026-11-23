@@ -67,6 +67,11 @@ echo "Test 4: the names the module declined are reported by the build..."
 check "the declined function is named"  "$out" "accumulate"
 check "with the reason, not a guess"    "$out" "non-const reference parameter"
 check "under a heading that counts it"  "$out" "free function(s) the module declined"
+# Tape::cursor is a raw pointer. The class binds without it, which is only
+# honest if the build says which member went missing.
+check "a declined data member is named" "$out" "Tape::cursor"
+check "under its own heading"           "$out" "data member(s) the module declined"
+reject "and its class is not declined"  "$out" "class(es) the module declined"
 
 echo ""
 echo "Test 5: the JSON carries the same answer..."
@@ -81,7 +86,10 @@ names = [x["name"] for x in d["declined"]]
 assert "accumulate" in names, names
 reason = next(x["reason"] for x in d["declined"] if x["name"] == "accumulate")
 assert "non-const reference" in reason, reason
+members = [x["name"] for x in d["declined"] if x["kind"] == "member"]
+assert members == ["Tape::cursor"], members
 print("  ✓ status ok, imported.ok true, declined[] names accumulate with its reason")
+print("  ✓ and Tape::cursor as a member")
 PY
 
 echo ""
