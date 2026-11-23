@@ -347,6 +347,14 @@ if(MIRROR_BRIDGE_BUILD_PYTHON)
         )
     endif()
 
+    # std::multimap and std::unordered_multimap cross as a list of pairs
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/multimap)
+        mirror_bridge_python_module(multimap
+            multimap/multimap_binding.cpp
+            INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/multimap
+        )
+    endif()
+
     # A data member with no conversion is left out; its class still binds
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/declined_members)
         mirror_bridge_python_module(declined_members
@@ -451,6 +459,15 @@ if(MIRROR_BRIDGE_BUILD_LUA AND LUA_FOUND)
         )
         # require("type_safety") resolves the symbol from the module name
         set_target_properties(type_safety_lua PROPERTIES OUTPUT_NAME type_safety)
+    endif()
+
+    # std::multimap and std::unordered_multimap cross as an array of pairs
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/lua/multimap)
+        mirror_bridge_lua_module(multimap_lua
+            lua/multimap/multimap_lua_binding.cpp
+            INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/lua/multimap
+            OUTPUT_DIRECTORY ${LUA_TEST_OUTPUT_DIR}
+        )
     endif()
 
     # A method this backend cannot call is left out; its class still binds
@@ -562,6 +579,14 @@ if(MIRROR_BRIDGE_BUILD_JS AND NAPI_FOUND)
             target_link_options(foreign_addon PRIVATE -Wl,-undefined,dynamic_lookup)
         endif()
         add_dependencies(type_safety_js foreign_addon)
+    endif()
+
+    # Multimaps (the JavaScript half of lua/multimap)
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/js/multimap)
+        mirror_bridge_js_module(multimap_js
+            js/multimap/multimap_js_binding.cpp
+            INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/js/multimap
+        )
     endif()
 
     # Declined methods (the JavaScript half of lua/declined_methods)

@@ -1615,6 +1615,73 @@ bool from_python(PyObject* obj, std::pair<T1, T2>& p) {
     return from_python(first, p.first) && from_python(second, p.second);
 }
 
+// std::multimap and std::unordered_multimap.
+//
+// A key may repeat, so neither is a dict. Each reads as a list of (key,
+// value) pairs through the generic container conversion. Writing went
+// through that conversion too, which builds every element as the container's
+// value_type, and a multimap's value_type is pair<const K, V>: nothing can
+// be converted into a const key, so a class with one such member was a
+// compile error for the whole module. cpp-httplib's Headers is an
+// unordered_multimap and a member of both Request and Response.
+//
+// Takes what one reads as, a sequence of pairs, and also a dict for the
+// common case of one value per key. Built aside and moved in, so a value
+// that fails half way leaves the target as it was.
+template<typename Multimap>
+bool multimap_from_python(PyObject* obj, Multimap& out) {
+    using Entry = std::pair<typename Multimap::key_type, typename Multimap::mapped_type>;
+    Multimap filled;
+
+    if (PyDict_Check(obj)) {
+        PyObject *py_key, *py_value;
+        Py_ssize_t pos = 0;
+        while (PyDict_Next(obj, &pos, &py_key, &py_value)) {
+            Entry entry;
+            if (!from_python(py_key, entry.first)) return false;
+            if (!from_python(py_value, entry.second)) return false;
+            filled.emplace(std::move(entry));
+        }
+    } else {
+        // A str is a sequence of one-character strs, never of pairs.
+        if (PyUnicode_Check(obj) || PyBytes_Check(obj)) return false;
+        PyObject* items = PySequence_Fast(obj, "");
+        if (!items) {
+            PyErr_Clear();
+            return false;
+        }
+        for (Py_ssize_t i = 0; i < PySequence_Fast_GET_SIZE(items); ++i) {
+            // For a list, `items` is the caller's own list, and converting
+            // an element can run Python that shrinks it. Holding the item
+            // keeps the borrowed pointer valid while it is read.
+            PyObject* item = PySequence_Fast_GET_ITEM(items, i);
+            Py_INCREF(item);
+            Entry entry;
+            const bool converted = from_python(item, entry);
+            Py_DECREF(item);
+            if (!converted) {
+                Py_DECREF(items);
+                return false;
+            }
+            filled.emplace(std::move(entry));
+        }
+        Py_DECREF(items);
+    }
+
+    out = std::move(filled);
+    return true;
+}
+
+template<typename K, typename V, typename... Args>
+bool from_python(PyObject* obj, std::multimap<K, V, Args...>& map) {
+    return multimap_from_python(obj, map);
+}
+
+template<typename K, typename V, typename... Args>
+bool from_python(PyObject* obj, std::unordered_multimap<K, V, Args...>& map) {
+    return multimap_from_python(obj, map);
+}
+
 // ============================================================================
 // std::variant Support - Type-Safe Unions
 // ============================================================================
