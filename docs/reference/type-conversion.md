@@ -336,7 +336,7 @@ and refuses the rest, almost all of it by name at build time.
 | `T*` | a method named `begin`, `end`, `data` or one of their `c`/`r` forms | Not bound. That is a position, not an object: `end()` is one past the last element |
 | `const T*` | anywhere | Not bound. A wrapper is a mutable handle, so a borrow would let Python write through a pointer C++ declared read-only |
 | `T**`, `int*`, a pointer to a forward-declared class or to a class template that is declared and never defined | anywhere | Not bound |
-| a raw pointer inside a standard template: `std::vector<T*>`, `std::pair<T*, bool>`, `std::optional<T*>`, `std::map<K, T*>`, `std::function<void(T*)>` | a return, a parameter or a data member | Not bound. A class with such a data member is skipped |
+| a raw pointer inside a standard template: `std::vector<T*>`, `std::pair<T*, bool>`, `std::optional<T*>`, `std::map<K, T*>`, `std::function<void(T*)>` | a return, a parameter or a data member | Not bound. Such a data member is left out and its class binds without it |
 | `T*` | a method that is `&&`-qualified | Not bound, like any `&&`-qualified method: a wrapper's object is never an rvalue |
 
 ```cpp

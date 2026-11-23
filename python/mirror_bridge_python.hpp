@@ -2075,20 +2075,29 @@ consteval bool returns_borrowable_pointer() {
             return false;
         } else if constexpr (!NestedBindable<Pointee>) {
             return false;
+        } else if constexpr (names_implementation_class(^^Pointee)) {
+            // "Every member of the pointee converts" used to be asked here,
+            // because a class with a member that did not could never be
+            // bound. It can now: the member is what is left out. But that
+            // question had a second job, which was keeping `FILE*` out, FILE
+            // being a struct full of raw pointers. What is left to recognise
+            // it by is its name. No header a person wants bound declares a
+            // class whose name is reserved for the implementation, and a
+            // method that takes or returns one is better absent than present
+            // and raising at every call.
+            //
+            // Asked in an `if constexpr` arm like the questions above it, and
+            // not as `return !names_implementation_class(^^Pointee)`. With
+            // the reflection of a local alias in a plain return, GCC 16
+            // answered `if constexpr (returns_borrowable_pointer<R>())` false
+            // inside invoke_with_n_args while a constexpr variable holding
+            // the same call was true, and a method returning its own
+            // argument stopped giving that argument back.
+            return false;
         } else {
             // A borrow is only ever a wrapper of a bound class, and whether
-            // a module binds this one is a runtime fact, checked at the
-            // call. This used to ask that every member of the pointee
-            // convert, because a class with one that did not could never be
-            // bound. It can now: the member is what is left out.
-            //
-            // That question had a second job, which was keeping `FILE*` out:
-            // FILE is a struct full of raw pointers. What is left to
-            // recognise it by is its name. No header a person wants bound
-            // declares a class whose name is reserved for the implementation,
-            // and a method that takes or returns one is better absent than
-            // present and raising at every call.
-            return !names_implementation_class(^^Pointee);
+            // a module binds this one is a runtime fact, checked at the call.
+            return true;
         }
     }
 }
