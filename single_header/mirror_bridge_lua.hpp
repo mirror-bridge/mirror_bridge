@@ -551,6 +551,11 @@ void report_declined_data_members(const char* class_name) {
 // derived object is well-formed and the compiler applies the base offset, the
 // same property the method cache already relies on.
 //
+// Not filtered by conversion the way CarriedDataMembers is. The C# backend
+// is the reader of this list, and it decides member by member what crosses
+// its C ABI and names what does not; filtering here would take members out
+// of that report without a word.
+//
 // Depth-first with the bases before T, so an inherited member keeps a stable
 // index when a derived field is added. A name T redeclares shadows the base's
 // in C++, and binding both would export one name twice, so the derived one
@@ -581,17 +586,14 @@ consteval std::vector<std::meta::info> data_members_with_bases() {
                 if (!std::meta::has_identifier(m)) continue;
                 const auto name = std::meta::identifier_of(m);
                 if (already(name)) continue;
-                // Recorded as seen whether or not it converts: a base member
-                // left out must still hide the same name further up, as it
-                // does in C++.
                 seen.push_back(name);
-                if (data_member_converts(m)) out.push_back(m);
+                out.push_back(m);
             }
         }
     };
     walk(walk, ^^T);
 
-    for (auto m : CarriedDataMembers<T>::members) out.push_back(m);
+    for (auto m : named_data_members<T>()) out.push_back(m);
     return out;
 }
 
