@@ -717,12 +717,17 @@ std::string type_hint() {
     } else if constexpr (std::is_void_v<CleanT>) {
         return "None";
     } else if constexpr (std::is_pointer_v<CleanT>) {
-        // The only other pointer that gets bound is a pointer to a class
-        // returned by an instance method, which crosses as a borrow of that
+        // The only other pointer that gets bound is a pointer to a class.
+        // Returned by an instance method it crosses as a borrow of that
         // class and as None when it is null. Saying so matters to a
         // caller: `doc.RootElement().Name()` on an empty document is the bug
         // a type checker can catch only if the stub admits the None.
-        return type_hint<std::remove_cv_t<std::remove_pointer_t<CleanT>>, P>() + " | None";
+        //
+        // As a parameter it takes an object of that class. Whether it also
+        // takes None depends on the parameter and not on its type, so
+        // register_method_stub adds that where it is true.
+        std::string pointee = type_hint<std::remove_cv_t<std::remove_pointer_t<CleanT>>, P>();
+        return P == Position::Param ? pointee : pointee + " | None";
     }
 
     // Eigen fixed-size vectors/matrices convert to (nested) Python lists.
@@ -909,11 +914,18 @@ void register_method_stub(const char* class_name, const char* method_name,
 
     // Generate parameters
     std::vector<std::string> type_hints = {param_hint<Args>()...};
+    const std::vector<bool> is_class_pointer = {
+        (std::is_pointer_v<std::remove_cvref_t<Args>> &&
+         std::is_class_v<std::remove_pointer_t<std::remove_cvref_t<Args>>>)...};
     for (size_t i = 0; i < type_hints.size(); ++i) {
         std::string pname = i < param_names.size() ? param_names[i] : std::string();
+        const bool has_default = i >= min_required;
+        // The runtime passes None as nullptr only to a pointer parameter the
+        // header gives a default argument; the stub says the same.
+        if (is_class_pointer[i] && has_default) type_hints[i] += " | None";
         // The third field is has_default. render_parameters reads it; without
         // it every defaulted parameter renders as required.
-        method.parameters.push_back({pname, type_hints[i], i >= min_required});
+        method.parameters.push_back({pname, type_hints[i], has_default});
     }
 
     info.methods.push_back(method);

@@ -3223,13 +3223,73 @@ consteval bool is_wrapper_backed_class() {
     }
 }
 
+// ============================================================================
+// Pointer Parameters: Borrowed for the Call
+// ============================================================================
+//
+// `void World::attach(Body* body)` and `Body* World::CreateBody(const
+// BodyDef* def)` take the address of an object the caller already has. From
+// Python that is the wrapper's own object, exactly what a `Body&` parameter
+// has always received, so the argument is passed the same way: the address
+// the wrapper holds, no copy, adjusted to the base subobject when the
+// argument is a derived class.
+//
+// Two things a pointer says that a reference does not, and how each is
+// answered:
+//
+//   It may be null. None becomes nullptr only for a parameter the header
+//   declares with a default argument, because that is the one place the
+//   signature says the callee expects to be called without an object. For
+//   every other pointer parameter None is refused as a wrong argument:
+//   tinyxml2's InsertEndChild asserts on null and dereferences it in a
+//   release build, and a TypeError is a better answer than a segfault.
+//
+//   It may be an array. `Set(const Vec2* points, int count)` reads `count`
+//   objects, and a wrapper holds one. See pointer_param_is_an_array below.
+//
+// What this assumes and cannot check, the same as for a reference parameter:
+// the callee does not keep the pointer past the call and does not free it. A
+// callee that stores it (SetListener) leaves the caller responsible for
+// keeping the Python object alive, as C++ would; one that takes ownership of
+// an object Python owns is a double free. Constructors store their pointer
+// arguments far more often than methods do, so they are left unbound here
+// until an argument can be kept alive by the object it was given to.
+//
+// `T*&` is refused: it is an out-parameter that hands a pointer back, and
+// there is nowhere in a Python argument to put one.
+template<typename ParamType>
+consteval bool takes_borrowable_pointer() {
+    using Clean = std::remove_cvref_t<ParamType>;
+    if constexpr (!std::is_pointer_v<Clean>) {
+        return false;
+    } else if constexpr (std::is_lvalue_reference_v<ParamType> &&
+                         !std::is_const_v<std::remove_reference_t<ParamType>>) {
+        return false;
+    } else {
+        // `const T*` is accepted where a returned `const T*` is not: passing
+        // one in gives the callee LESS access than the wrapper already had.
+        using Pointee = std::remove_const_t<std::remove_pointer_t<Clean>>;
+        // The pointee rules are the return side's, asked through it so the
+        // two cannot drift: not a std type, not incomplete, and a class
+        // bind_class would accept.
+        if constexpr (!returns_borrowable_pointer<Pointee*>()) {
+            return false;
+        } else {
+            return is_wrapper_backed_class<Pointee>();
+        }
+    }
+}
+
 template<typename ParamType>
 struct py_param_storage {
     using Clean = std::remove_cvref_t<ParamType>;
     using type = std::conditional_t<
-        std::is_lvalue_reference_v<ParamType> && is_wrapper_backed_class<Clean>(),
-        Clean*,                                        // zero-copy: alias the wrapper's object
-        mirror_bridge::core::param_storage_t<ParamType>>;
+        takes_borrowable_pointer<ParamType>(),
+        Clean,                                         // the pointer itself, passed as it is
+        std::conditional_t<
+            std::is_lvalue_reference_v<ParamType> && is_wrapper_backed_class<Clean>(),
+            Clean*,                                    // zero-copy: alias the wrapper's object
+            mirror_bridge::core::param_storage_t<ParamType>>>;
 };
 
 template<typename ParamType>
@@ -3287,14 +3347,28 @@ consteval bool param_writes_reach_caller() {
 
 // Dispatcher: value storage vs pointer storage.
 // Called in method dispatch to populate the tuple of stored args.
+//
+// `none_is_null` is whether THIS parameter may receive None as nullptr. It is
+// a property of the parameter's declaration and not of its type, so it is
+// passed by the caller that knows which parameter this is.
 template<typename ParamType, typename Storage>
-inline bool extract_param(PyObject* obj, Storage& out) {
-    // Pointer STORAGE means pointer-holder (aliasing a wrapper's object) —
-    // but only when the parameter itself isn't a pointer type. A
-    // `const char*` parameter has pointer-typed VALUE storage and must go
-    // through from_python (Clipper2's exception ctor taught us this).
-    if constexpr (std::is_pointer_v<Storage> &&
-                  !std::is_pointer_v<std::remove_cvref_t<ParamType>>) {
+inline bool extract_param(PyObject* obj, Storage& out, bool none_is_null = false) {
+    if constexpr (takes_borrowable_pointer<ParamType>()) {
+        if (obj == Py_None) {
+            out = nullptr;
+            return none_is_null;
+        }
+        using Pointee = std::remove_const_t<std::remove_pointer_t<Storage>>;
+        void* raw = nullptr;
+        if (!resolve_wrapper_object<Pointee>(obj, raw)) { out = nullptr; return false; }
+        out = static_cast<Pointee*>(raw);
+        return true;
+    } else if constexpr (std::is_pointer_v<Storage> &&
+                         !std::is_pointer_v<std::remove_cvref_t<ParamType>>) {
+        // Pointer STORAGE means pointer-holder (aliasing a wrapper's object) —
+        // but only when the parameter itself isn't a pointer type. A
+        // `const char*` parameter has pointer-typed VALUE storage and must go
+        // through from_python (Clipper2's exception ctor taught us this).
         return from_python_pointer(obj, out);
     } else {
         return from_python(obj, out);
@@ -4612,15 +4686,6 @@ consteval bool method_return_convertible() {
     }
 }
 
-// Is this method bound only because its pointer return can be borrowed? The
-// overloads for which this is false are the ones that existed before borrows
-// did, and the dispatcher tries them first.
-template<typename T, std::size_t Index>
-consteval bool method_bound_through_a_pointer() {
-    using Ret = typename [:get_method_return_type<T, Index>():];
-    return !return_type_convertible<Ret>();
-}
-
 // Every out-parameter of a method writes somewhere the caller can see it.
 template<typename T, std::size_t Index>
 consteval bool method_out_params_reach_caller() {
@@ -4640,11 +4705,121 @@ consteval bool static_method_out_params_reach_caller() {
     }(std::make_index_sequence<n>{});
 }
 
-// Bindable = every parameter storable, every write observable, and the return
-// convertible.
+// The parameter gate for this backend: everything the shared gate admits,
+// plus a pointer to a bound class, which Python can supply from a wrapper.
+// The shared gate is left alone because Lua, JavaScript and C# read it too
+// and have no such conversion.
+template<typename ParamType>
+consteval bool py_param_bindable() {
+    if constexpr (takes_borrowable_pointer<ParamType>()) {
+        return true;
+    } else {
+        return mirror_bridge::core::is_param_bindable<ParamType>();
+    }
+}
+
+template<typename T, std::size_t Index>
+consteval bool py_method_params_bindable() {
+    constexpr std::size_t n = mirror_bridge::core::get_method_param_count<T, Index>();
+    return []<std::size_t... Is>(std::index_sequence<Is...>) {
+        return (py_param_bindable<mirror_bridge::core::method_param_t<T, Index, Is>>() && ...);
+    }(std::make_index_sequence<n>{});
+}
+
+template<typename T, std::size_t Index>
+consteval bool py_static_method_params_bindable() {
+    constexpr std::size_t n = mirror_bridge::core::get_static_method_param_count<T, Index>();
+    return []<std::size_t... Is>(std::index_sequence<Is...>) {
+        return (py_param_bindable<
+                    mirror_bridge::core::static_method_param_t<T, Index, Is>>() && ...);
+    }(std::make_index_sequence<n>{});
+}
+
+template<typename T, std::size_t Index>
+consteval bool method_takes_borrowed_pointer() {
+    constexpr std::size_t n = mirror_bridge::core::get_method_param_count<T, Index>();
+    return []<std::size_t... Is>(std::index_sequence<Is...>) {
+        return (takes_borrowable_pointer<
+                    mirror_bridge::core::method_param_t<T, Index, Is>>() || ...);
+    }(std::make_index_sequence<n>{});
+}
+
+// Is this method bound only because a pointer in its signature can cross: a
+// return that is borrowed, or a parameter that takes a wrapped object? The
+// overloads for which this is false are the ones that existed before either
+// could, and the dispatcher tries them first.
+template<typename T, std::size_t Index>
+consteval bool method_bound_through_a_pointer() {
+    using Ret = typename [:get_method_return_type<T, Index>():];
+    if constexpr (!return_type_convertible<Ret>()) {
+        return true;
+    } else {
+        return method_takes_borrowed_pointer<T, Index>();
+    }
+}
+
+// Does this parameter's name say it counts the elements behind a pointer?
+// Case is ignored, and the short spellings match only as the whole name.
+consteval bool names_an_element_count(std::string_view name) {
+    std::string lowered;
+    for (char c : name) lowered += (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    for (std::string_view whole : {"n", "nb", "cnt", "sz"}) {
+        if (lowered == whole) return true;
+    }
+    for (std::string_view part : {"count", "size", "len", "num", "capacity"}) {
+        if (lowered.find(part) != std::string::npos) return true;
+    }
+    return false;
+}
+
+// Does `func` take a pointer to a class with an element count beside it?
+//
+//   void b2PolygonShape::Set(const b2Vec2* points, int32 count)
+//
+// reads `count` objects starting at `points`. A wrapper holds exactly one, so
+// binding this lets `shape.Set(vec, 8)` read seven objects past the end of
+// it. Nothing in the types tells that signature from
+// `void Layout::addWidget(Widget* w, int stretch)`, which takes one object;
+// the parameter's NAME does, and reflection has it. So a pointer is taken to
+// be an array when the parameter on either side of it is an integer that is
+// named like a count, or is an integer with no name to go by. An array
+// passed with no count in the signature at all cannot be seen from here, and
+// is the assumption this makes.
+consteval bool pointer_param_is_an_array(std::meta::info func) {
+    const auto params = std::meta::parameters_of(func);
+    const auto plain_type = [&](std::size_t i) {
+        return std::meta::dealias(std::meta::remove_cvref(std::meta::type_of(params[i])));
+    };
+    const auto counts_elements = [&](std::size_t i) {
+        const std::meta::info type = plain_type(i);
+        if (!std::meta::is_integral_type(type) || type == ^^bool) return false;
+        return !std::meta::has_identifier(params[i]) ||
+               names_an_element_count(std::meta::identifier_of(params[i]));
+    };
+    for (std::size_t i = 0; i < params.size(); ++i) {
+        const std::meta::info type = plain_type(i);
+        if (!std::meta::is_pointer_type(type) ||
+            !std::meta::is_class_type(std::meta::remove_cv(std::meta::remove_pointer(type)))) {
+            continue;
+        }
+        if (i > 0 && counts_elements(i - 1)) return true;
+        if (i + 1 < params.size() && counts_elements(i + 1)) return true;
+    }
+    return false;
+}
+
+template<typename T, std::size_t Index>
+consteval bool method_takes_array_pointer() {
+    return pointer_param_is_an_array(get_member_function<T, Index>());
+}
+
+// Bindable = every parameter storable, no pointer that is really an array,
+// every write observable, and the return convertible.
 template<typename T, std::size_t Index>
 consteval bool method_fully_bindable() {
-    if constexpr (!mirror_bridge::core::method_params_all_bindable<T, Index>()) {
+    if constexpr (!py_method_params_bindable<T, Index>()) {
+        return false;
+    } else if constexpr (method_takes_array_pointer<T, Index>()) {
         return false;
     } else if constexpr (!method_out_params_reach_caller<T, Index>()) {
         return false;
@@ -4713,14 +4888,16 @@ inline bool report_declined_methods() {
     return on;
 }
 
-// Why method_fully_bindable said no. The three arms are the same three, in
-// the same order, so a gate that grows a fourth reason without a string here
+// Why method_fully_bindable said no. The four arms are the same four, in
+// the same order, so a gate that grows a fifth reason without a string here
 // says "declined" and names no cause -- which is the state this whole
 // diagnostic exists to end.
 template<typename T, std::size_t Index>
 consteval const char* method_decline_reason() {
-    if constexpr (!mirror_bridge::core::method_params_all_bindable<T, Index>()) {
+    if constexpr (!py_method_params_bindable<T, Index>()) {
         return "a parameter type has no conversion from Python";
+    } else if constexpr (method_takes_array_pointer<T, Index>()) {
+        return "it takes a pointer beside an element count, which is an array and not one object";
     } else if constexpr (!method_out_params_reach_caller<T, Index>()) {
         return "it writes through a parameter whose writes cannot reach the caller";
     } else if constexpr (!method_return_convertible<T, Index>()) {
@@ -4732,7 +4909,9 @@ consteval const char* method_decline_reason() {
 
 template<typename T, std::size_t Index>
 consteval bool static_method_fully_bindable() {
-    if constexpr (!mirror_bridge::core::static_method_params_all_bindable<T, Index>()) {
+    if constexpr (!py_static_method_params_bindable<T, Index>()) {
+        return false;
+    } else if constexpr (pointer_param_is_an_array(get_static_member_function<T, Index>())) {
         return false;
     } else if constexpr (!static_method_out_params_reach_caller<T, Index>()) {
         return false;
@@ -5016,7 +5195,8 @@ PyObject* invoke_with_n_args(PyWrapper<T>* wrapper, PyObject* const* resolved) {
         ([&] {
             if (!conversion_ok) return;
             if (!extract_param<method_param_t<T, FuncIndex, Is>>(
-                    resolved[Is], std::get<Is>(cpp_args))) {
+                    resolved[Is], std::get<Is>(cpp_args),
+                    param_has_default<T, FuncIndex, Is>())) {
                 conversion_ok = false;
             }
         }(), ...);
@@ -5228,9 +5408,12 @@ void describe_call_failure(const char* name, Py_ssize_t nargs, PyObject* kwnames
 // only find(int) could be bound before a pointer return could cross, so
 // `tree.find(3)` returned an int. Had find(double) simply joined the list in
 // declaration order it would now be tried first, accept the 3, and the same
-// call would return a Node. The dispatcher therefore runs this pass twice,
-// pointer overloads second, so a call that matched an overload before still
-// matches the same one.
+// call would return a Node. A pointer parameter does the same from the other
+// side: a wrapped object converts for `f(const T&)` and for `f(T*)` alike, and
+// the second is, by convention, the one more likely to keep or adopt what it
+// is given. The dispatcher therefore runs this pass twice, pointer overloads
+// second, so a call that matched an overload before still matches the same
+// one.
 //
 // A function template and not a generic lambda in the dispatcher: GCC 16
 // rejects the fold over AllIndices inside a lambda that has template
