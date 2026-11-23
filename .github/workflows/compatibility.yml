@@ -14,9 +14,13 @@ on:
   schedule:
     - cron: '23 5 * * 1'
 
+# packages: read is for pulling the job's container image. Naming any
+# permission here drops every one that is not named, and the image is pulled
+# with this token; an image that is not public then fails to pull.
 permissions:
   contents: write
   pull-requests: write
+  packages: read
 
 concurrency:
   group: compatibility
